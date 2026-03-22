@@ -74,24 +74,42 @@ __version__ = "0.1.0"
 **Step 4: Create src/semdex/cli.py with skeleton**
 
 ```python
+import os
+from pathlib import Path
+
 import click
 
 
+def _find_project_root() -> Path:
+    """Find the project root (directory containing .git)."""
+    cwd = Path.cwd()
+    for parent in [cwd, *cwd.parents]:
+        if (parent / ".git").is_dir():
+            return parent
+    return cwd
+
+
 @click.group()
-def cli():
+@click.option("--project-root-dir", type=click.Path(exists=True, file_okay=False, path_type=Path),
+              default=None, help="Project root directory (default: auto-detect from .git)")
+@click.pass_context
+def cli(ctx, project_root_dir):
     """semdex - A semantic project indexer for Claude."""
-    pass
+    ctx.ensure_object(dict)
+    ctx.obj["root"] = project_root_dir.resolve() if project_root_dir else _find_project_root()
 
 
 @cli.command()
-def init():
+@click.pass_context
+def init(ctx):
     """Initialize semdex for the current project."""
     click.echo("semdex init - not yet implemented")
 
 
 @cli.command()
 @click.argument("target", required=False)
-def index(target):
+@click.pass_context
+def index(ctx, target):
     """Build or rebuild the semantic index."""
     click.echo(f"semdex index {target or '.'} - not yet implemented")
 
@@ -99,44 +117,51 @@ def index(target):
 @cli.command()
 @click.argument("query")
 @click.option("--top-k", default=10, type=int, help="Number of results")
-def search(query, top_k):
+@click.pass_context
+def search(ctx, query, top_k):
     """Search the semantic index."""
     click.echo(f"semdex search '{query}' - not yet implemented")
 
 
 @cli.command()
-def serve():
+@click.pass_context
+def serve(ctx):
     """Start the MCP server."""
     click.echo("semdex serve - not yet implemented")
 
 
 @cli.command()
-def status():
+@click.pass_context
+def status(ctx):
     """Show index statistics."""
     click.echo("semdex status - not yet implemented")
 
 
 @cli.command()
 @click.argument("path")
-def forget(path):
+@click.pass_context
+def forget(ctx, path):
     """Remove a path from the index."""
     click.echo(f"semdex forget '{path}' - not yet implemented")
 
 
 @cli.group()
-def hook():
+@click.pass_context
+def hook(ctx):
     """Manage git hooks."""
     pass
 
 
 @hook.command("install")
-def hook_install():
+@click.pass_context
+def hook_install(ctx):
     """Install the post-commit hook."""
     click.echo("semdex hook install - not yet implemented")
 
 
 @hook.command("uninstall")
-def hook_uninstall():
+@click.pass_context
+def hook_uninstall(ctx):
     """Uninstall the post-commit hook."""
     click.echo("semdex hook uninstall - not yet implemented")
 ```
@@ -1529,22 +1554,24 @@ def test_cli_help():
 
 def test_init_creates_index(tmp_path):
     runner = CliRunner()
-    # Create a minimal project
+    # Create a minimal project with git
     (tmp_path / "main.py").write_text("x = 1\n")
-    result = runner.invoke(cli, ["init"], catch_exceptions=False)
+    import subprocess
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    result = runner.invoke(cli, ["--project-root-dir", str(tmp_path), "init"], catch_exceptions=False)
     # Just verify it doesn't crash for now
     assert result.exit_code == 0 or "error" not in result.output.lower()
 
 
-def test_status_no_index():
+def test_status_no_index(tmp_path):
     runner = CliRunner()
-    result = runner.invoke(cli, ["status"])
+    result = runner.invoke(cli, ["--project-root-dir", str(tmp_path), "status"])
     assert result.exit_code == 0
 
 
-def test_hook_install_no_git():
+def test_hook_install_no_git(tmp_path):
     runner = CliRunner()
-    result = runner.invoke(cli, ["hook", "install"])
+    result = runner.invoke(cli, ["--project-root-dir", str(tmp_path), "hook", "install"])
     assert result.exit_code == 0 or "not a git" in result.output.lower()
 ```
 
@@ -1582,15 +1609,20 @@ def _find_project_root() -> Path:
 
 
 @click.group()
-def cli():
+@click.option("--project-root-dir", type=click.Path(exists=True, file_okay=False, path_type=Path),
+              default=None, help="Project root directory (default: auto-detect from .git)")
+@click.pass_context
+def cli(ctx, project_root_dir):
     """semdex - A semantic project indexer for Claude."""
-    pass
+    ctx.ensure_object(dict)
+    ctx.obj["root"] = project_root_dir.resolve() if project_root_dir else _find_project_root()
 
 
 @cli.command()
-def init():
+@click.pass_context
+def init(ctx):
     """Initialize semdex for the current project."""
-    root = _find_project_root()
+    root = ctx.obj["root"]
     config = SemdexConfig(project_root=root)
     config.ensure_dirs()
 
@@ -1627,9 +1659,10 @@ def init():
 
 @cli.command()
 @click.argument("target", required=False)
-def index(target):
+@click.pass_context
+def index(ctx, target):
     """Build or rebuild the semantic index."""
-    root = _find_project_root()
+    root = ctx.obj["root"]
     config = SemdexConfig.load(root)
     config.ensure_dirs()
 
@@ -1654,9 +1687,10 @@ def index(target):
 @cli.command()
 @click.argument("query")
 @click.option("--top-k", default=10, type=int, help="Number of results")
-def search(query, top_k):
+@click.pass_context
+def search(ctx, query, top_k):
     """Search the semantic index."""
-    root = _find_project_root()
+    root = ctx.obj["root"]
     config = SemdexConfig.load(root)
 
     from semdex.embeddings import LocalEmbedder
@@ -1678,16 +1712,18 @@ def search(query, top_k):
 
 
 @cli.command()
-def serve():
+@click.pass_context
+def serve(ctx):
     """Start the MCP server."""
-    root = _find_project_root()
+    root = ctx.obj["root"]
     run_server(root)
 
 
 @cli.command()
-def status():
+@click.pass_context
+def status(ctx):
     """Show index statistics."""
-    root = _find_project_root()
+    root = ctx.obj["root"]
     config = SemdexConfig.load(root)
 
     if not config.db_path.exists():
@@ -1704,9 +1740,10 @@ def status():
 
 @cli.command()
 @click.argument("path")
-def forget(path):
+@click.pass_context
+def forget(ctx, path):
     """Remove a path from the index."""
-    root = _find_project_root()
+    root = ctx.obj["root"]
     config = SemdexConfig.load(root)
     store = SemdexStore(db_path=config.db_path)
 
@@ -1721,15 +1758,17 @@ def forget(path):
 
 
 @cli.group()
-def hook():
+@click.pass_context
+def hook(ctx):
     """Manage git hooks."""
     pass
 
 
 @hook.command("install")
-def hook_install():
+@click.pass_context
+def hook_install(ctx):
     """Install the post-commit hook."""
-    root = _find_project_root()
+    root = ctx.obj["root"]
     if not (root / ".git").is_dir():
         click.echo("Not a git repository", err=True)
         raise SystemExit(1)
@@ -1738,9 +1777,10 @@ def hook_install():
 
 
 @hook.command("uninstall")
-def hook_uninstall():
+@click.pass_context
+def hook_uninstall(ctx):
     """Uninstall the post-commit hook."""
-    root = _find_project_root()
+    root = ctx.obj["root"]
     uninstall_hook(root)
     click.echo("Post-commit hook removed")
 ```
@@ -1818,27 +1858,29 @@ def test_full_workflow():
 
         runner = CliRunner()
 
+        root_flag = ["--project-root-dir", str(root)]
+
         # Init
-        result = runner.invoke(cli, ["init"], catch_exceptions=False)
+        result = runner.invoke(cli, root_flag + ["init"], catch_exceptions=False)
         assert result.exit_code == 0
         assert "Indexed" in result.output
         assert (root / ".claude" / "semdex").is_dir()
 
         # Status
-        result = runner.invoke(cli, ["status"], catch_exceptions=False)
+        result = runner.invoke(cli, root_flag + ["status"], catch_exceptions=False)
         assert result.exit_code == 0
         assert "Files indexed:" in result.output
 
         # Search
         result = runner.invoke(
-            cli, ["search", "authentication"], catch_exceptions=False
+            cli, root_flag + ["search", "authentication"], catch_exceptions=False
         )
         assert result.exit_code == 0
         assert "auth.py" in result.output
 
         # Forget
         result = runner.invoke(
-            cli, ["forget", "auth.py"], catch_exceptions=False
+            cli, root_flag + ["forget", "auth.py"], catch_exceptions=False
         )
         assert result.exit_code == 0
         assert "Removed" in result.output
