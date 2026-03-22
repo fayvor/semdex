@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "semdex"
+version = "0.1.0"
+description = "A semantic project indexer for Claude"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.0",
+    "lancedb>=0.6",
+    "sentence-transformers>=2.0",
+    "pathspec>=0.11",
+    "mcp>=1.0",
+    "tree-sitter>=0.23",
+    "tree-sitter-python>=0.23",
+    "tree-sitter-javascript>=0.23",
+    "tree-sitter-typescript>=0.23",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+semdex = "semdex.cli:cli"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
