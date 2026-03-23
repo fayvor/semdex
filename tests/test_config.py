@@ -13,7 +13,7 @@ def test_default_config():
         assert config.db_path == Path(tmpdir) / ".claude" / "semdex" / "lance.db"
         assert config.max_file_size == 1_000_000
         assert config.chunk_threshold == 200
-        assert config.embedding_model == "all-MiniLM-L6-v2"
+        assert config.embedding_model == "sentence-transformers/all-MiniLM-L6-v2"
 
 
 def test_ensure_dirs_creates_structure():

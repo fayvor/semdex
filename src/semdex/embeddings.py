@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-from sentence_transformers import SentenceTransformer
+from fastembed import TextEmbedding
 
 
 class LocalEmbedder:
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
-        self._model = SentenceTransformer(model_name)
-        self.dimension = self._model.get_sentence_embedding_dimension()
+    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
+        self._model = TextEmbedding(model_name=model_name)
+        # all-MiniLM-L6-v2 produces 384-dimensional embeddings
+        self.dimension = 384
 
     def encode(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        embeddings = self._model.encode(texts)
+        embeddings = list(self._model.embed(texts))
         return [vec.tolist() for vec in embeddings]

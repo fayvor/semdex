@@ -32,7 +32,7 @@ BINARY_EXTENSIONS = {
 @dataclass
 class SemdexConfig:
     project_root: Path
-    embedding_model: str = "all-MiniLM-L6-v2"
+    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     max_file_size: int = 1_000_000  # 1MB
     chunk_threshold: int = 200  # lines
     extra_excludes: list[str] = field(default_factory=list)
