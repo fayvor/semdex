@@ -59,10 +59,17 @@ def init():
         install_hook(root)
         click.echo("Installed post-commit hook")
 
-    # Print MCP config for user
-    semdex_path = os.popen("which semdex").read().strip() or "semdex"
-    click.echo(f"\nAdd to your Claude Code MCP config:")
-    click.echo(f'  "semdex": {{"command": "{semdex_path}", "args": ["serve"]}}')
+    # Print next steps
+    click.echo("\n--- Next steps ---")
+    click.echo("")
+    click.echo("1. Register the MCP server with Claude Code:")
+    click.echo("   claude mcp add semdex -- semdex serve")
+    click.echo("")
+    click.echo("2. Verify Claude can see it:")
+    click.echo("   claude mcp list")
+    click.echo("")
+    click.echo("3. Start a Claude Code session and ask it to search your project!")
+    click.echo("   Claude now has access to: search, related, summary tools")
 
 
 @cli.command()

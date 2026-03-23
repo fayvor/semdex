@@ -45,6 +45,8 @@ def discover_files(
 
 from datetime import datetime, timezone
 
+import click
+
 from semdex.chunker import chunk_file
 from semdex.embeddings import LocalEmbedder
 from semdex.store import SemdexStore
@@ -77,42 +79,42 @@ def index_project(
         source_dir = str(project_root.resolve())
 
     now = datetime.now(timezone.utc).isoformat()
-    all_chunks = []
+    total_files = len(file_list)
+    total_chunks = 0
 
-    for path in file_list:
-        chunks = chunk_file(path, threshold=config.chunk_threshold)
-        if target_dir:
-            rel_path = str(path.relative_to(target_dir))
-        else:
-            try:
-                rel_path = str(path.relative_to(project_root))
-            except ValueError:
-                rel_path = str(path)
+    with click.progressbar(file_list, label="Indexing", length=total_files,
+                           item_show_func=lambda p: p.name if p else "") as bar:
+        for path in bar:
+            chunks = chunk_file(path, threshold=config.chunk_threshold)
+            if target_dir:
+                rel_path = str(path.relative_to(target_dir))
+            else:
+                try:
+                    rel_path = str(path.relative_to(project_root))
+                except ValueError:
+                    rel_path = str(path)
 
-        for chunk in chunks:
-            all_chunks.append({
-                "file_path": rel_path,
-                "start_line": chunk.start_line,
-                "end_line": chunk.end_line,
-                "chunk_type": chunk.chunk_type,
-                "content": chunk.content,
-                "source_dir": source_dir,
-                "last_indexed": now,
-            })
+            file_chunks = []
+            for chunk in chunks:
+                file_chunks.append({
+                    "file_path": rel_path,
+                    "start_line": chunk.start_line,
+                    "end_line": chunk.end_line,
+                    "chunk_type": chunk.chunk_type,
+                    "content": chunk.content,
+                    "source_dir": source_dir,
+                    "last_indexed": now,
+                })
 
-    if not all_chunks:
-        return {"files_indexed": 0, "chunks_created": 0}
-
-    # Batch embed all chunks
-    texts = [c["content"] for c in all_chunks]
-    vectors = embedder.encode(texts)
-
-    for chunk, vector in zip(all_chunks, vectors):
-        chunk["vector"] = vector
-
-    store.add_chunks(all_chunks)
+            if file_chunks:
+                texts = [c["content"] for c in file_chunks]
+                vectors = embedder.encode(texts)
+                for chunk, vector in zip(file_chunks, vectors):
+                    chunk["vector"] = vector
+                store.add_chunks(file_chunks)
+                total_chunks += len(file_chunks)
 
     return {
-        "files_indexed": len(file_list),
-        "chunks_created": len(all_chunks),
+        "files_indexed": total_files,
+        "chunks_created": total_chunks,
     }
