@@ -52,7 +52,10 @@ def init():
     # Build initial index
     click.echo("Building initial index...")
     stats = index_project(root, config)
-    click.echo(f"Indexed {stats['files_indexed']} files ({stats['chunks_created']} chunks)")
+    msg = f"Indexed {stats['files_indexed']} files ({stats['chunks_created']} chunks)"
+    if stats.get("skipped"):
+        msg += f", skipped {stats['skipped']} unchanged"
+    click.echo(msg)
 
     # Install hook
     if (root / ".git").is_dir():
@@ -95,7 +98,10 @@ def index(target):
         click.echo("Rebuilding full index...")
         stats = index_project(root, config)
 
-    click.echo(f"Indexed {stats['files_indexed']} files ({stats['chunks_created']} chunks)")
+    msg = f"Indexed {stats['files_indexed']} files ({stats['chunks_created']} chunks)"
+    if stats.get("skipped"):
+        msg += f", skipped {stats['skipped']} unchanged"
+    click.echo(msg)
 
 
 @cli.command()
