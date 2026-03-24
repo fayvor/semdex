@@ -111,6 +111,46 @@ class SemdexStore:
             "chunk_count": len(indices),
         }
 
+    def get_all_file_metadata(self) -> dict[str, dict]:
+        """Get metadata for all files in the index.
+
+        Returns:
+            Dictionary mapping file_path -> {mtime, last_indexed, chunk_count}
+        """
+        table = self._get_table()
+        if table is None:
+            return {}
+
+        arrow_table = table.to_arrow()
+        file_paths = arrow_table.column("file_path").to_pylist()
+
+        # Check if mtime column exists (backwards compatibility)
+        try:
+            mtimes = arrow_table.column("mtime").to_pylist()
+            has_mtime = True
+        except KeyError:
+            mtimes = [None] * len(file_paths)
+            has_mtime = False
+
+        last_indexed_list = arrow_table.column("last_indexed").to_pylist()
+
+        # Group by file_path
+        metadata = {}
+        for i, file_path in enumerate(file_paths):
+            if file_path not in metadata:
+                metadata[file_path] = {
+                    "mtime": mtimes[i] if has_mtime else None,
+                    "last_indexed": last_indexed_list[i],
+                    "chunk_count": 1,
+                }
+            else:
+                metadata[file_path]["chunk_count"] += 1
+                # Update last_indexed to the most recent
+                if last_indexed_list[i] > metadata[file_path]["last_indexed"]:
+                    metadata[file_path]["last_indexed"] = last_indexed_list[i]
+
+        return metadata
+
     def stats(self) -> dict:
         table = self._get_table()
         if table is None:

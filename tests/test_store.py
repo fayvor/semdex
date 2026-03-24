@@ -166,3 +166,47 @@ def test_store_get_file_metadata_not_found():
         store = SemdexStore(db_path=Path(tmpdir) / "lance.db", dimension=4)
         metadata = store.get_file_metadata("nonexistent.py")
         assert metadata is None
+
+
+def test_store_get_all_file_metadata():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = SemdexStore(db_path=Path(tmpdir) / "lance.db", dimension=4)
+        store.add_chunks([
+            {
+                "file_path": "foo.py",
+                "start_line": 1,
+                "end_line": 10,
+                "chunk_type": "whole-file",
+                "content": "def foo(): pass",
+                "source_dir": ".",
+                "last_indexed": "2026-03-21T00:00:00",
+                "mtime": 1234567890.0,
+                "vector": [1.0, 0.0, 0.0, 0.0],
+            },
+            {
+                "file_path": "bar.py",
+                "start_line": 1,
+                "end_line": 5,
+                "chunk_type": "whole-file",
+                "content": "def bar(): pass",
+                "source_dir": ".",
+                "last_indexed": "2026-03-21T00:00:01",
+                "mtime": 1234567891.0,
+                "vector": [0.0, 1.0, 0.0, 0.0],
+            },
+        ])
+        all_metadata = store.get_all_file_metadata()
+        assert len(all_metadata) == 2
+        assert "foo.py" in all_metadata
+        assert "bar.py" in all_metadata
+        assert all_metadata["foo.py"]["mtime"] == 1234567890.0
+        assert all_metadata["foo.py"]["chunk_count"] == 1
+        assert all_metadata["bar.py"]["mtime"] == 1234567891.0
+        assert all_metadata["bar.py"]["chunk_count"] == 1
+
+
+def test_store_get_all_file_metadata_empty():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = SemdexStore(db_path=Path(tmpdir) / "lance.db", dimension=4)
+        all_metadata = store.get_all_file_metadata()
+        assert all_metadata == {}
