@@ -77,6 +77,40 @@ class SemdexStore:
             "last_indexed": last_indexed,
         }
 
+    def get_file_metadata(self, file_path: str) -> dict | None:
+        """Get metadata for a specific file.
+
+        Returns:
+            dict with keys: file_path, mtime, last_indexed, chunk_count
+            None if file is not in index
+        """
+        table = self._get_table()
+        if table is None:
+            return None
+
+        arrow_table = table.to_arrow()
+        col = arrow_table.column("file_path").to_pylist()
+        indices = [i for i, v in enumerate(col) if v == file_path]
+
+        if not indices:
+            return None
+
+        # Get mtime from first chunk (all chunks for a file share same mtime)
+        try:
+            mtime = arrow_table.column("mtime")[indices[0]].as_py()
+        except KeyError:
+            # Old schema without mtime field
+            mtime = None
+
+        last_indexed = max(arrow_table.column("last_indexed")[i].as_py() for i in indices)
+
+        return {
+            "file_path": file_path,
+            "mtime": mtime,
+            "last_indexed": last_indexed,
+            "chunk_count": len(indices),
+        }
+
     def stats(self) -> dict:
         table = self._get_table()
         if table is None:
