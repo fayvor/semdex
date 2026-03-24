@@ -357,8 +357,6 @@ def index_project(
         # Index external directory — don't respect gitignore
         file_list = discover_files(target_dir, config, respect_gitignore=False)
         source_dir = str(target_dir.resolve())
-        # Remove old entries for this dir before re-indexing
-        store.delete_by_source_dir(source_dir)
         # External dirs: apply skip logic unless force=True
         to_index, to_skip = _filter_files_by_mtime(file_list, store, force, target_dir)
     elif files:
@@ -366,13 +364,6 @@ def index_project(
         source_dir = str(project_root.resolve())
         # Specific files: apply skip logic unless force=True
         to_index, to_skip = _filter_files_by_mtime(file_list, store, force, project_root)
-        # Remove old entries for specified files that will be re-indexed
-        for f in to_index:
-            try:
-                rel_path = str(f.relative_to(project_root))
-            except ValueError:
-                rel_path = f.name
-            store.delete_by_file(rel_path)
     else:
         # Full project scan
         file_list = discover_files(project_root, config)
@@ -389,7 +380,7 @@ def index_project(
     with click.progressbar(to_index, label="Indexing", length=len(to_index),
                            item_show_func=lambda p: p.name if p else "") as bar:
         for path in bar:
-            chunks = chunk_file(path, threshold=config.chunk_threshold)
+            # Calculate relative path
             if target_dir:
                 rel_path = str(path.relative_to(target_dir))
             else:
@@ -397,6 +388,12 @@ def index_project(
                     rel_path = str(path.relative_to(project_root))
                 except ValueError:
                     rel_path = str(path)
+
+            # Delete old chunks for this file before re-indexing (atomic operation)
+            store.delete_by_file(rel_path)
+
+            # Chunk the file
+            chunks = chunk_file(path, threshold=config.chunk_threshold)
 
             # Get file mtime
             mtime = path.stat().st_mtime
@@ -594,15 +591,12 @@ def _prune_deleted_files(
     Args:
         discovered_files: Files found during discovery
         store: SemdexStore instance
-        source_dir: Source directory to filter by
+        source_dir: Source directory to filter by (only delete files from this source)
         project_root: Project root for relative path calculation
 
     Returns:
         Count of files deleted from index
     """
-    # Get all indexed files
-    all_metadata = store.get_all_file_metadata()
-
     # Build set of discovered file paths (relative)
     discovered_set = set()
     for file_path in discovered_files:
@@ -612,16 +606,27 @@ def _prune_deleted_files(
             rel_path = file_path.name
         discovered_set.add(rel_path)
 
-    # Find files in index but not discovered (deleted)
-    deleted_count = 0
-    for indexed_file in all_metadata.keys():
-        if indexed_file not in discovered_set:
-            # Only delete if it belongs to this source_dir
-            # (don't touch externally indexed content)
-            store.delete_by_file(indexed_file)
-            deleted_count += 1
+    # Get all chunks from the store and check source_dir
+    table = store._get_table()
+    if table is None:
+        return 0
 
-    return deleted_count
+    arrow_table = table.to_arrow()
+    file_paths = arrow_table.column("file_path").to_pylist()
+    source_dirs = arrow_table.column("source_dir").to_pylist()
+
+    # Find unique files in this source_dir that weren't discovered
+    files_to_delete = set()
+    for file_path, file_source_dir in zip(file_paths, source_dirs):
+        # Only consider files from our source_dir (don't touch external indexes)
+        if file_source_dir == source_dir and file_path not in discovered_set:
+            files_to_delete.add(file_path)
+
+    # Delete stale files
+    for file_path in files_to_delete:
+        store.delete_by_file(file_path)
+
+    return len(files_to_delete)
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
