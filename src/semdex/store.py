@@ -25,7 +25,23 @@ class SemdexStore:
         if self._get_table() is None:
             self._table = self._db.create_table(self.TABLE_NAME, data)
         else:
-            self._table.add(data)
+            # Check if table schema has mtime field (backward compatibility)
+            try:
+                arrow_table = self._table.to_arrow()
+                has_mtime = "mtime" in arrow_table.column_names
+            except Exception:
+                has_mtime = False
+
+            # If old schema without mtime, strip mtime from new data to maintain compatibility
+            if not has_mtime and data and "mtime" in data[0]:
+                data_copy = []
+                for chunk in data:
+                    chunk_copy = chunk.copy()
+                    chunk_copy.pop("mtime", None)
+                    data_copy.append(chunk_copy)
+                self._table.add(data_copy)
+            else:
+                self._table.add(data)
 
     def add_chunks(self, chunks: list[dict]) -> None:
         if not chunks:
