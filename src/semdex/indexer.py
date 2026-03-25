@@ -130,10 +130,16 @@ def index_project(
                 total_chunks += len(file_chunks)
                 files_indexed += 1
 
+    # Pruning: only for full project scans (no target specified)
+    files_deleted = 0
+    if not target_dir and not files:
+        files_deleted = _prune_deleted_files(file_list, store, source_dir, project_root)
+
     return {
         "files_discovered": total_files,
         "files_skipped": files_skipped,
         "files_indexed": files_indexed,
+        "files_deleted": files_deleted,
         "chunks_created": total_chunks,
     }
 
@@ -189,3 +195,52 @@ def _filter_files_by_mtime(
         to_index.append(file_path)
 
     return (to_index, to_skip)
+
+
+def _prune_deleted_files(
+    discovered_files: list[Path],
+    store: SemdexStore,
+    source_dir: str,
+    project_root: Path,
+) -> int:
+    """Remove entries from index for files that no longer exist.
+
+    Args:
+        discovered_files: Files found during discovery
+        store: SemdexStore instance
+        source_dir: Source directory to filter by (only delete files from this source)
+        project_root: Project root for relative path calculation
+
+    Returns:
+        Count of files deleted from index
+    """
+    # Build set of discovered file paths (relative)
+    discovered_set = set()
+    for file_path in discovered_files:
+        try:
+            rel_path = str(file_path.relative_to(project_root))
+        except ValueError:
+            rel_path = file_path.name
+        discovered_set.add(rel_path)
+
+    # Get all chunks from the store and check source_dir
+    table = store._get_table()
+    if table is None:
+        return 0
+
+    arrow_table = table.to_arrow()
+    file_paths = arrow_table.column("file_path").to_pylist()
+    source_dirs = arrow_table.column("source_dir").to_pylist()
+
+    # Find unique files in this source_dir that weren't discovered
+    files_to_delete = set()
+    for file_path, file_source_dir in zip(file_paths, source_dirs):
+        # Only consider files from our source_dir (don't touch external indexes)
+        if file_source_dir == source_dir and file_path not in discovered_set:
+            files_to_delete.add(file_path)
+
+    # Delete stale files
+    for file_path in files_to_delete:
+        store.delete_by_file(file_path)
+
+    return len(files_to_delete)

@@ -123,3 +123,40 @@ def test_index_project_force_flag_reindexes_all():
         stats2 = index_project(root, config, force=True)
         assert stats2["files_indexed"] == 1
         assert stats2["files_skipped"] == 0
+
+
+def test_index_project_prunes_deleted_files():
+    """Test that deleted files are removed from index."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+
+        # Create and index initial files
+        file1 = root / "file1.py"
+        file2 = root / "file2.py"
+        file1.write_text("x = 1")
+        file2.write_text("y = 2")
+
+        config = SemdexConfig(project_root=root)
+        config.ensure_dirs()
+
+        stats1 = index_project(root, config)
+        assert stats1["files_indexed"] == 2
+
+        # Verify both files are in index
+        from semdex.store import SemdexStore
+        store = SemdexStore(db_path=config.db_path)
+        assert store.get_file_metadata("file1.py") is not None
+        assert store.get_file_metadata("file2.py") is not None
+
+        # Delete one file
+        file2.unlink()
+
+        # Re-index - should detect deletion
+        stats2 = index_project(root, config)
+        assert stats2["files_discovered"] == 1
+        assert stats2["files_deleted"] == 1
+
+        # Verify deleted file is removed from index (create fresh store to avoid cache)
+        store_after = SemdexStore(db_path=config.db_path)
+        assert store_after.get_file_metadata("file1.py") is not None
+        assert store_after.get_file_metadata("file2.py") is None
