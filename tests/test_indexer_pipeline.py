@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from semdex.config import SemdexConfig
-from semdex.indexer import index_project
+from semdex.indexer import index_project, Checkpoint
 
 
 def test_index_project_end_to_end():
@@ -139,3 +139,80 @@ def test_parallel_memory_stays_bounded():
 
         assert stats["files_indexed"] == 1000
         assert peak < 2_000_000_000, f"Peak memory too high: {peak_mb:.2f} MB"
+
+
+def test_checkpoint_class():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "cp.json"
+        cp = Checkpoint(path)
+
+        assert not cp.is_current("foo.py", 123.0)
+
+        cp.mark_done("foo.py", 123.0)
+        assert cp.is_current("foo.py", 123.0)
+        assert not cp.is_current("foo.py", 456.0)
+
+        cp.save()
+        cp2 = Checkpoint(path)
+        assert cp2.is_current("foo.py", 123.0)
+
+        cp2.clear()
+        assert not cp2.is_current("foo.py", 123.0)
+
+        cp2.save()
+        cp2.remove()
+        assert not path.exists()
+
+
+def test_checkpoint_resume_skips_processed_files():
+    """Files tracked in checkpoint but not yet in DB are skipped on resume."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        (root / "a.py").write_text("x = 1\n")
+        (root / "b.py").write_text("y = 2\n")
+
+        config = SemdexConfig(project_root=root, parallel_enabled=False)
+        config.ensure_dirs()
+
+        # Simulate: a.py was processed but interrupted before DB flush
+        cp = Checkpoint(config.semdex_dir / "checkpoint.json")
+        mtime_a = (root / "a.py").stat().st_mtime
+        cp.mark_done("a.py", mtime_a)
+        cp.save()
+
+        stats = index_project(root, config)
+        assert stats["files_skipped"] == 1
+        assert stats["files_indexed"] == 1
+
+
+def test_checkpoint_cleaned_up_on_success():
+    """Checkpoint file is removed after successful full index."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        (root / "a.py").write_text("x = 1\n")
+
+        config = SemdexConfig(project_root=root, parallel_enabled=False)
+        config.ensure_dirs()
+
+        cp_path = config.semdex_dir / "checkpoint.json"
+        stats = index_project(root, config)
+        assert not cp_path.exists()
+
+
+def test_checkpoint_not_cleaned_up_for_specific_files():
+    """Checkpoint persists when indexing specific files (not full scan)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        (root / "a.py").write_text("x = 1\n")
+
+        config = SemdexConfig(project_root=root, parallel_enabled=False)
+        config.ensure_dirs()
+
+        # Pre-create checkpoint
+        cp = Checkpoint(config.semdex_dir / "checkpoint.json")
+        cp.mark_done("other.py", 999.0)
+        cp.save()
+
+        stats = index_project(root, config, files=[root / "a.py"])
+        # Checkpoint should still exist (not cleaned up for partial runs)
+        assert (config.semdex_dir / "checkpoint.json").exists()
