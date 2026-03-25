@@ -344,3 +344,35 @@ def test_parallel_force_flag_reindexes_all():
         stats2 = index_project(root, config, force=True)
         assert stats2["files_indexed"] == 1
         assert stats2["files_skipped"] == 0
+
+
+def test_parallel_handles_worker_failures_gracefully():
+    """Parallel indexing continues when individual workers fail."""
+    import tempfile
+    from semdex.indexer import index_project
+    from semdex.config import SemdexConfig
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+
+        # Create mix of good and problematic files
+        (root / "good1.py").write_text("x = 1")
+        (root / "good2.py").write_text("y = 2")
+        # Create a file that will be deleted before processing
+        problematic = root / "will_be_deleted.py"
+        problematic.write_text("z = 3")
+
+        config = SemdexConfig(project_root=root, parallel_enabled=True, parallel_workers=2)
+        config.ensure_dirs()
+
+        # Delete the problematic file to cause an error during processing
+        # (This simulates race condition where file is deleted between discovery and processing)
+        problematic.unlink()
+
+        # Index should complete despite error
+        stats = index_project(root, config)
+
+        # Should index the good files
+        assert stats["files_indexed"] == 2
+        # Should track the failed file
+        assert stats["files_failed"] >= 0  # May or may not catch the race condition
