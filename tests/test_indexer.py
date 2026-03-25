@@ -236,3 +236,47 @@ def test_index_parallel_processes_files():
         assert stats["files_indexed"] == 10
         assert stats["files_failed"] == 0
         assert stats["chunks_created"] > 0
+
+
+def test_parallel_produces_same_results_as_sequential():
+    """Parallel and sequential modes produce identical index."""
+    import tempfile
+    from semdex.indexer import index_project
+    from semdex.config import SemdexConfig
+    from semdex.store import SemdexStore
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+
+        # Create test files with varied content
+        (root / "small.py").write_text("x = 1")
+        (root / "medium.py").write_text("\n".join([f"line_{i} = {i}" for i in range(50)]))
+        (root / "large.py").write_text("\n".join([f"def func_{i}():\n    return {i}" for i in range(100)]))
+
+        # Index with sequential
+        config_seq = SemdexConfig(project_root=root, parallel_enabled=False)
+        config_seq.ensure_dirs()
+        stats_seq = index_project(root, config_seq)
+
+        store_seq = SemdexStore(db_path=config_seq.db_path)
+        metadata_seq = store_seq.get_all_file_metadata()
+
+        # Clear and index with parallel
+        import shutil
+        shutil.rmtree(config_seq.db_path)
+
+        config_par = SemdexConfig(project_root=root, parallel_enabled=True, parallel_workers=2)
+        config_par.ensure_dirs()
+        stats_par = index_project(root, config_par)
+
+        store_par = SemdexStore(db_path=config_par.db_path)
+        metadata_par = store_par.get_all_file_metadata()
+
+        # Compare stats
+        assert stats_seq["files_indexed"] == stats_par["files_indexed"]
+        assert stats_seq["chunks_created"] == stats_par["chunks_created"]
+
+        # Compare metadata
+        assert set(metadata_seq.keys()) == set(metadata_par.keys())
+        for file_path in metadata_seq:
+            assert metadata_seq[file_path]["chunk_count"] == metadata_par[file_path]["chunk_count"]
