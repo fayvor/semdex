@@ -62,9 +62,11 @@ claude mcp list
 
 ```bash
 semdex init                  # Initialize: index project, install git hook, print setup instructions
-semdex index                 # Rebuild the full index
-semdex index <dir>           # Index an external directory (ignores .gitignore)
+semdex index                 # Smart re-index (skip unchanged files, prune deleted files)
+semdex index --force         # Full re-index (delete and rebuild entire index)
+semdex index <dir>           # Index an external directory
 semdex index <file>          # Re-index a specific file
+semdex index --force <file>  # Force re-index a specific file (bypass mtime check)
 semdex search <query>        # Search the index from the command line
 semdex status                # Show index stats (file count, last indexed, size)
 semdex forget <path>         # Remove a path from the index
@@ -74,6 +76,14 @@ semdex serve                 # Start the MCP server (called by Claude Code)
 ```
 
 All commands accept `--project-root-dir <path>` to target a specific project.
+
+### Smart Indexing
+
+By default, `semdex index` uses smart incremental indexing:
+- **Skips unchanged files**: Files are skipped if their modification time hasn't changed since last index
+- **Automatically resumes**: If indexing is interrupted, re-running will continue from where it left off
+- **Prunes deleted files**: Files removed from the project are automatically removed from the index
+- **Force rebuild**: Use `--force` to delete and rebuild the entire index from scratch
 
 ## Integration with Claude Code
 
