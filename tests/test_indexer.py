@@ -280,3 +280,42 @@ def test_parallel_produces_same_results_as_sequential():
         assert set(metadata_seq.keys()) == set(metadata_par.keys())
         for file_path in metadata_seq:
             assert metadata_seq[file_path]["chunk_count"] == metadata_par[file_path]["chunk_count"]
+
+
+def test_parallel_respects_mtime_skip():
+    """Parallel mode skips unchanged files based on mtime."""
+    import tempfile
+    import time
+    from semdex.indexer import index_project
+    from semdex.config import SemdexConfig
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+
+        # Create files
+        file1 = root / "file1.py"
+        file2 = root / "file2.py"
+        file1.write_text("x = 1")
+        file2.write_text("y = 2")
+
+        config = SemdexConfig(project_root=root, parallel_enabled=True, parallel_workers=2)
+        config.ensure_dirs()
+
+        # First index
+        stats1 = index_project(root, config)
+        assert stats1["files_indexed"] == 2
+        assert stats1["files_skipped"] == 0
+
+        # Second index without changes - should skip both
+        stats2 = index_project(root, config)
+        assert stats2["files_indexed"] == 0
+        assert stats2["files_skipped"] == 2
+
+        # Modify one file
+        time.sleep(0.01)
+        file1.write_text("x = 100")
+
+        # Third index - should index only modified file
+        stats3 = index_project(root, config)
+        assert stats3["files_indexed"] == 1
+        assert stats3["files_skipped"] == 1
