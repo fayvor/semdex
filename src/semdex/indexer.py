@@ -87,8 +87,16 @@ def index_project(
     files_skipped = len(to_skip)
     files_indexed = 0
 
-    with click.progressbar(to_index, label="Indexing", length=len(to_index),
-                           item_show_func=lambda p: p.name if p else "") as bar:
+    # Progress bar showing what's being indexed
+    # (final summary will show skipped/indexed/deleted counts)
+    progress_label = f"Indexing ({len(to_skip)} skipped)"
+
+    with click.progressbar(
+        to_index,
+        label=progress_label,
+        length=len(to_index),
+        item_show_func=lambda p: p.name if p else ""
+    ) as bar:
         for path in bar:
             # Calculate relative path
             if target_dir:
