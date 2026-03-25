@@ -58,7 +58,7 @@ def init():
     # Install hook
     if (root / ".git").is_dir():
         install_hook(root)
-        click.echo("Installed post-commit hook")
+        click.echo("Installed post-commit and post-checkout hooks")
 
     # Print next steps
     click.echo("\n--- Next steps ---")
