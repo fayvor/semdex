@@ -100,3 +100,42 @@ def test_parallel_faster_than_sequential():
         print(f"\nSequential: {time_seq:.2f}s, Parallel: {time_par:.2f}s, Speedup: {time_seq/time_par:.2f}x")
         # Just verify parallel completes successfully and produces same results
         # Actual speedup depends heavily on system resources and file sizes
+
+
+def test_parallel_memory_stays_bounded():
+    """Parallel indexing should not use excessive memory."""
+    import tempfile
+    import tracemalloc
+    from semdex.indexer import index_project
+    from semdex.config import SemdexConfig
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+
+        # Create 1000 small files
+        for i in range(1000):
+            (root / f"file{i}.py").write_text(f"x = {i}\ny = {i+1}")
+
+        config = SemdexConfig(
+            project_root=root,
+            parallel_enabled=True,
+            parallel_workers=4,
+            write_batch_size=100  # Small batches for this test
+        )
+        config.ensure_dirs()
+
+        # Track memory
+        tracemalloc.start()
+        baseline = tracemalloc.get_traced_memory()[0]
+
+        stats = index_project(root, config)
+
+        current, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+
+        # Peak memory should be reasonable (< 2 GB = 2,000,000,000 bytes)
+        peak_mb = peak / 1024 / 1024
+        print(f"\nPeak memory: {peak_mb:.2f} MB")
+
+        assert stats["files_indexed"] == 1000
+        assert peak < 2_000_000_000, f"Peak memory too high: {peak_mb:.2f} MB"
