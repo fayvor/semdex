@@ -32,3 +32,12 @@ def test_save_and_load_config():
 
         loaded = SemdexConfig.load(Path(tmpdir))
         assert loaded.max_file_size == 500_000
+
+
+def test_config_parallel_defaults():
+    """Test that parallel config has sensible defaults."""
+    config = SemdexConfig(project_root=Path("/tmp/test"))
+    assert config.parallel_enabled is True
+    assert config.parallel_workers == 0  # 0 = auto-detect
+    assert config.write_batch_size == 500
+    assert config.min_files_for_parallel == 50

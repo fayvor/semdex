@@ -37,6 +37,12 @@ class SemdexConfig:
     chunk_threshold: int = 200  # lines
     extra_excludes: list[str] = field(default_factory=list)
 
+    # Parallelism settings
+    parallel_enabled: bool = True
+    parallel_workers: int = 0  # 0 = auto-detect (cpu_count - 1)
+    write_batch_size: int = 500  # Files per batch write
+    min_files_for_parallel: int = 50  # Use sequential for small jobs
+
     @property
     def semdex_dir(self) -> Path:
         return self.project_root / ".claude" / "semdex"
@@ -62,6 +68,10 @@ class SemdexConfig:
             "max_file_size": self.max_file_size,
             "chunk_threshold": self.chunk_threshold,
             "extra_excludes": self.extra_excludes,
+            "parallel_enabled": self.parallel_enabled,
+            "parallel_workers": self.parallel_workers,
+            "write_batch_size": self.write_batch_size,
+            "min_files_for_parallel": self.min_files_for_parallel,
         }
         self.config_path.write_text(json.dumps(data, indent=2))
 
@@ -74,4 +84,8 @@ class SemdexConfig:
             config.max_file_size = data.get("max_file_size", config.max_file_size)
             config.chunk_threshold = data.get("chunk_threshold", config.chunk_threshold)
             config.extra_excludes = data.get("extra_excludes", config.extra_excludes)
+            config.parallel_enabled = data.get("parallel_enabled", config.parallel_enabled)
+            config.parallel_workers = data.get("parallel_workers", config.parallel_workers)
+            config.write_batch_size = data.get("write_batch_size", config.write_batch_size)
+            config.min_files_for_parallel = data.get("min_files_for_parallel", config.min_files_for_parallel)
         return config
