@@ -93,6 +93,52 @@ Once the MCP server is registered, Claude has access to three tools:
 - **`related`**: Find files related to a given file. Useful when Claude is editing code and needs to find tests, models, or connected modules.
 - **`summary`**: Get index metadata for a file (chunk count, types, last indexed).
 
+## Performance
+
+Semdex uses parallel processing to index large repositories quickly:
+
+- **Small repos** (< 100 files): Sequential mode, completes in seconds
+- **Medium repos** (1,000-5,000 files): 10 workers, 1-2 minutes
+- **Large repos** (20,000+ files): 10 workers, 6-8 minutes
+
+On a 12-core system, expect 8-10x speedup vs sequential processing.
+
+### Tuning Performance
+
+Configure in `.claude/semdex/config.json`:
+
+```json
+{
+  "parallel_enabled": true,
+  "parallel_workers": 8,
+  "write_batch_size": 1000,
+  "min_files_for_parallel": 50
+}
+```
+
+**Configuration options:**
+
+- `parallel_enabled`: Enable/disable parallel processing (default: `true`)
+- `parallel_workers`: Number of worker processes. `0` = auto-detect (cpu_count - 1). Default: `0`
+- `write_batch_size`: Files to buffer before writing to database. Larger = faster but more memory. Default: `500`
+- `min_files_for_parallel`: Minimum files to trigger parallel mode. Below this uses sequential. Default: `50`
+
+### Troubleshooting
+
+**"Indexing is slow"**:
+- Verify `parallel_enabled` is `true` in config
+- Check system has multiple CPU cores available
+- Ensure system has adequate RAM (16+ GB recommended)
+
+**"Running out of memory"**:
+- Reduce `write_batch_size` to `250` or `100`
+- Reduce `parallel_workers` to `4` or `6`
+- Close memory-intensive applications
+
+**"System becomes unresponsive"**:
+- Reduce `parallel_workers` to leave more CPU headroom
+- Check system cooling (CPU throttling can slow things down)
+
 ## What Gets Indexed
 
 By default, semdex indexes:
