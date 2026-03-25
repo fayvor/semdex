@@ -59,8 +59,9 @@ def test_resume_after_partial_indexing():
         assert stats["files_skipped"] == 5  # First 5 already indexed
         assert stats["files_indexed"] == 5  # Last 5 newly indexed
 
-        # Verify all 10 files are in index
-        all_metadata = store.get_all_file_metadata()
+        # Verify all 10 files are in index (use fresh store to avoid cache)
+        store_fresh = SemdexStore(db_path=config.db_path)
+        all_metadata = store_fresh.get_all_file_metadata()
         assert len(all_metadata) == 10
 
 
