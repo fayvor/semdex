@@ -131,62 +131,141 @@ def _process_file_worker(args: tuple) -> dict:
         }
 
 
-def index_project(
-    project_root: Path,
+def _index_parallel(
+    files: list[Path],
+    store: SemdexStore,
     config: SemdexConfig,
-    files: list[Path] | None = None,
-    target_dir: Path | None = None,
-    force: bool = False,
+    base_path: Path,
+    source_dir: str,
+    now: str,
 ) -> dict:
-    """Index files and store embeddings. Returns stats dict."""
-    embedder = LocalEmbedder(model_name=config.embedding_model)
-    store = SemdexStore(db_path=config.db_path, dimension=embedder.dimension)
+    """Index files in parallel using process pool.
 
-    if target_dir:
-        # Index external directory — don't respect gitignore
-        file_list = discover_files(target_dir, config, respect_gitignore=False)
-        source_dir = str(target_dir.resolve())
-        # External dirs: apply skip logic unless force=True
-        to_index, to_skip = _filter_files_by_mtime(file_list, store, force, target_dir)
-    elif files:
-        file_list = files
-        source_dir = str(project_root.resolve())
-        # Specific files: apply skip logic unless force=True
-        to_index, to_skip = _filter_files_by_mtime(file_list, store, force, project_root)
-    else:
-        # Full project scan
-        file_list = discover_files(project_root, config)
-        source_dir = str(project_root.resolve())
-        # Apply skip logic unless force=True
-        to_index, to_skip = _filter_files_by_mtime(file_list, store, force, project_root)
+    Args:
+        files: List of file paths to index
+        store: SemdexStore instance
+        config: SemdexConfig instance
+        base_path: Base path for relative path calculation
+        source_dir: Source directory string
+        now: ISO timestamp string
 
-    now = datetime.now(timezone.utc).isoformat()
-    total_files = len(file_list)
+    Returns:
+        Stats dict with files_indexed, files_failed, chunks_created
+    """
+    import os
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    # Determine worker count
+    num_workers = config.parallel_workers
+    if num_workers == 0:
+        num_workers = max(1, os.cpu_count() - 1)
+    num_workers = min(num_workers, 11)  # Cap at 11
+
+    # Sort files by size (largest first) for better load balancing
+    files_with_size = [(f, f.stat().st_size) for f in files]
+    files_with_size.sort(key=lambda x: x[1], reverse=True)
+    sorted_files = [f for f, _ in files_with_size]
+
+    # Prepare config dict (serializable)
+    config_dict = {
+        "chunk_threshold": config.chunk_threshold,
+        "max_file_size": config.max_file_size,
+    }
+
+    # Stats tracking
+    files_indexed = 0
+    files_failed = 0
     total_chunks = 0
-    files_skipped = len(to_skip)
+    results_buffer = []
+
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        # Submit all files to pool
+        future_to_file = {
+            executor.submit(
+                _process_file_worker,
+                (f, base_path, config_dict, config.embedding_model, source_dir, now)
+            ): f
+            for f in sorted_files
+        }
+
+        # Process results as they complete
+        with click.progressbar(
+            length=len(sorted_files),
+            label="Indexing",
+            show_pos=True
+        ) as bar:
+            for future in as_completed(future_to_file):
+                result = future.result()
+
+                if result["error"]:
+                    files_failed += 1
+                    click.echo(f"\nWarning: Failed to process {result['file_path']}: {result['error']}", err=True)
+                else:
+                    # Delete old chunks for this file before adding new ones
+                    store.delete_by_file(result["file_path"])
+
+                    # Add to buffer
+                    results_buffer.extend(result["chunks"])
+                    files_indexed += 1
+                    total_chunks += len(result["chunks"])
+
+                    # Batch write when buffer is full
+                    if len(results_buffer) >= config.write_batch_size:
+                        if results_buffer:
+                            store.add_chunks(results_buffer)
+                        results_buffer.clear()
+
+                bar.update(1)
+
+            # Flush remaining results
+            if results_buffer:
+                store.add_chunks(results_buffer)
+                results_buffer.clear()
+
+    return {
+        "files_indexed": files_indexed,
+        "files_failed": files_failed,
+        "chunks_created": total_chunks,
+    }
+
+
+def _index_sequential(
+    files: list[Path],
+    store: SemdexStore,
+    config: SemdexConfig,
+    base_path: Path,
+    source_dir: str,
+    now: str,
+) -> dict:
+    """Index files sequentially (original implementation).
+
+    Args:
+        files: List of file paths to index
+        store: SemdexStore instance
+        config: SemdexConfig instance
+        base_path: Base path for relative path calculation
+        source_dir: Source directory string
+        now: ISO timestamp string
+
+    Returns:
+        Stats dict with files_indexed, chunks_created
+    """
+    # Create embedder once, reuse for all files
+    embedder = LocalEmbedder(model_name=config.embedding_model)
+
+    total_chunks = 0
     files_indexed = 0
 
-    # Progress bar showing what's being indexed
-    # (final summary will show skipped/indexed/deleted counts)
-    progress_label = f"Indexing ({len(to_skip)} skipped)"
-
-    with click.progressbar(
-        to_index,
-        label=progress_label,
-        length=len(to_index),
-        item_show_func=lambda p: p.name if p else ""
-    ) as bar:
+    with click.progressbar(files, label="Indexing", length=len(files),
+                           item_show_func=lambda p: p.name if p else "") as bar:
         for path in bar:
             # Calculate relative path
-            if target_dir:
-                rel_path = str(path.relative_to(target_dir))
-            else:
-                try:
-                    rel_path = str(path.relative_to(project_root))
-                except ValueError:
-                    rel_path = str(path)
+            try:
+                rel_path = str(path.relative_to(base_path))
+            except ValueError:
+                rel_path = str(path)
 
-            # Delete old chunks for this file before re-indexing (atomic operation)
+            # Delete old chunks for this file before re-indexing
             store.delete_by_file(rel_path)
 
             # Chunk the file
@@ -209,6 +288,7 @@ def index_project(
                 })
 
             if file_chunks:
+                # Generate embeddings (reuse embedder)
                 texts = [c["content"] for c in file_chunks]
                 vectors = embedder.encode(texts)
                 for chunk, vector in zip(file_chunks, vectors):
@@ -217,17 +297,77 @@ def index_project(
                 total_chunks += len(file_chunks)
                 files_indexed += 1
 
+    return {
+        "files_indexed": files_indexed,
+        "chunks_created": total_chunks,
+    }
+
+
+def index_project(
+    project_root: Path,
+    config: SemdexConfig,
+    files: list[Path] | None = None,
+    target_dir: Path | None = None,
+    force: bool = False,
+) -> dict:
+    """Index files and store embeddings. Returns stats dict."""
+    store = SemdexStore(db_path=config.db_path, dimension=384)
+
+    if target_dir:
+        # Index external directory — don't respect gitignore
+        file_list = discover_files(target_dir, config, respect_gitignore=False)
+        source_dir = str(target_dir.resolve())
+        # External dirs: apply skip logic unless force=True
+        to_index, to_skip = _filter_files_by_mtime(file_list, store, force, target_dir)
+    elif files:
+        file_list = files
+        source_dir = str(project_root.resolve())
+        # Specific files: apply skip logic unless force=True
+        to_index, to_skip = _filter_files_by_mtime(file_list, store, force, project_root)
+    else:
+        # Full project scan
+        file_list = discover_files(project_root, config)
+        source_dir = str(project_root.resolve())
+        # Apply skip logic unless force=True
+        to_index, to_skip = _filter_files_by_mtime(file_list, store, force, project_root)
+
+    now = datetime.now(timezone.utc).isoformat()
+    total_files = len(file_list)
+    files_skipped = len(to_skip)
+
+    # Determine base_path for relative path calculation
+    if target_dir:
+        base_path = target_dir
+    else:
+        base_path = project_root
+
+    # Choose parallel or sequential path
+    use_parallel = (
+        config.parallel_enabled
+        and len(to_index) >= config.min_files_for_parallel
+    )
+
+    if use_parallel:
+        index_stats = _index_parallel(
+            to_index, store, config, base_path, source_dir, now
+        )
+    else:
+        index_stats = _index_sequential(
+            to_index, store, config, base_path, source_dir, now
+        )
+
     # Pruning: only for full project scans (no target specified)
     files_deleted = 0
     if not target_dir and not files:
-        files_deleted = _prune_deleted_files(file_list, store, source_dir, project_root)
+        files_deleted = _prune_deleted_files(file_list, store, source_dir, base_path)
 
     return {
         "files_discovered": total_files,
         "files_skipped": files_skipped,
-        "files_indexed": files_indexed,
+        "files_indexed": index_stats["files_indexed"],
+        "files_failed": index_stats.get("files_failed", 0),
         "files_deleted": files_deleted,
-        "chunks_created": total_chunks,
+        "chunks_created": index_stats["chunks_created"],
     }
 
 

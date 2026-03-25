@@ -209,3 +209,30 @@ def test_process_file_worker_handles_errors():
     assert result["error"] is not None
     assert "file.py" in result["file_path"]
     assert len(result["chunks"]) == 0
+
+
+def test_index_parallel_processes_files():
+    """Parallel indexing processes multiple files correctly."""
+    import tempfile
+    from semdex.indexer import index_project
+    from semdex.config import SemdexConfig
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+
+        # Create multiple test files
+        for i in range(10):
+            (root / f"file{i}.py").write_text(f"x = {i}")
+
+        config = SemdexConfig(
+            project_root=root,
+            parallel_enabled=True,
+            parallel_workers=2  # Use 2 workers for test
+        )
+        config.ensure_dirs()
+
+        stats = index_project(root, config)
+
+        assert stats["files_indexed"] == 10
+        assert stats["files_failed"] == 0
+        assert stats["chunks_created"] > 0
