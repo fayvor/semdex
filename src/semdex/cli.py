@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 
 import click
@@ -74,27 +75,43 @@ def init():
 
 @cli.command()
 @click.argument("target", required=False)
-def index(target):
+@click.option("--force", is_flag=True, help="Force re-index (bypass mtime checks or rebuild from scratch)")
+def index(target, force):
     """Build or rebuild the semantic index."""
     root = _find_project_root()
     config = SemdexConfig.load(root)
     config.ensure_dirs()
 
-    if target:
+    if force and not target:
+        # Full project + force: nuclear option - wipe and rebuild
+        click.echo("Deleting existing index...")
+        if config.db_path.exists():
+            shutil.rmtree(config.db_path)
+        click.echo("Rebuilding full index from scratch...")
+        stats = index_project(root, config)
+    elif target:
+        # Specific file/dir: pass force flag to bypass mtime check
         target_path = Path(target).resolve()
         if target_path.is_dir():
             click.echo(f"Indexing directory: {target_path}")
-            stats = index_project(root, config, target_dir=target_path)
+            stats = index_project(root, config, target_dir=target_path, force=force)
         elif target_path.is_file():
             click.echo(f"Indexing file: {target_path}")
-            stats = index_project(root, config, files=[target_path])
+            stats = index_project(root, config, files=[target_path], force=force)
         else:
             click.echo(f"Error: {target} not found", err=True)
             raise SystemExit(1)
     else:
+        # Full project, no force: smart indexing
         click.echo("Rebuilding full index...")
         stats = index_project(root, config)
 
+    # Display results
+    skipped = stats.get("files_skipped", 0)
+    deleted = stats.get("files_deleted", 0)
+    if skipped > 0 or deleted > 0:
+        click.echo(f"Processed {stats['files_discovered']} files "
+                   f"({skipped} skipped, {stats['files_indexed']} indexed, {deleted} deleted)")
     click.echo(f"Indexed {stats['files_indexed']} files ({stats['chunks_created']} chunks)")
 
 
