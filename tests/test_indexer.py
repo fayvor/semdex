@@ -319,3 +319,28 @@ def test_parallel_respects_mtime_skip():
         stats3 = index_project(root, config)
         assert stats3["files_indexed"] == 1
         assert stats3["files_skipped"] == 1
+
+
+def test_parallel_force_flag_reindexes_all():
+    """Parallel mode with force=True bypasses skip logic."""
+    import tempfile
+    from semdex.indexer import index_project
+    from semdex.config import SemdexConfig
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+
+        file1 = root / "file1.py"
+        file1.write_text("x = 1")
+
+        config = SemdexConfig(project_root=root, parallel_enabled=True, parallel_workers=2)
+        config.ensure_dirs()
+
+        # First index
+        stats1 = index_project(root, config)
+        assert stats1["files_indexed"] == 1
+
+        # Force re-index
+        stats2 = index_project(root, config, force=True)
+        assert stats2["files_indexed"] == 1
+        assert stats2["files_skipped"] == 0
