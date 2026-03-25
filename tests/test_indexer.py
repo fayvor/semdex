@@ -188,3 +188,24 @@ def test_process_file_worker_success():
         assert len(result["chunks"]) > 0
         assert "vector" in result["chunks"][0]
         assert result["chunks"][0]["mtime"] > 0
+
+
+def test_process_file_worker_handles_errors():
+    """Worker catches errors and returns error dict."""
+    from semdex.indexer import _process_file_worker
+
+    # Use non-existent file to trigger error
+    args = (
+        Path("/nonexistent/file.py"),
+        Path("/tmp"),
+        {"chunk_threshold": 200, "max_file_size": 1_000_000},
+        "sentence-transformers/all-MiniLM-L6-v2",
+        "/tmp",
+        "2026-03-25T12:00:00Z"
+    )
+
+    result = _process_file_worker(args)
+
+    assert result["error"] is not None
+    assert "file.py" in result["file_path"]
+    assert len(result["chunks"]) == 0
