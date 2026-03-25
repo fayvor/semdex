@@ -160,3 +160,31 @@ def test_index_project_prunes_deleted_files():
         store_after = SemdexStore(db_path=config.db_path)
         assert store_after.get_file_metadata("file1.py") is not None
         assert store_after.get_file_metadata("file2.py") is None
+
+
+def test_process_file_worker_success():
+    """Worker processes file and returns chunks with embeddings."""
+    import tempfile
+    from semdex.indexer import _process_file_worker
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        file_path = root / "test.py"
+        file_path.write_text("x = 1\ny = 2")
+
+        args = (
+            file_path,
+            root,  # base_path
+            {"chunk_threshold": 200, "max_file_size": 1_000_000},  # config_dict
+            "sentence-transformers/all-MiniLM-L6-v2",  # model_name
+            str(root),  # source_dir
+            "2026-03-25T12:00:00Z"  # now
+        )
+
+        result = _process_file_worker(args)
+
+        assert result["file_path"] == "test.py"
+        assert result["error"] is None
+        assert len(result["chunks"]) > 0
+        assert "vector" in result["chunks"][0]
+        assert result["chunks"][0]["mtime"] > 0

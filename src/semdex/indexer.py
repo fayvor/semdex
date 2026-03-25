@@ -52,6 +52,85 @@ from semdex.embeddings import LocalEmbedder
 from semdex.store import SemdexStore
 
 
+# Global cache for worker embedders (process-local)
+_worker_embedder_cache = {}
+
+
+def _process_file_worker(args: tuple) -> dict:
+    """Process a single file in worker process.
+
+    Args:
+        args: (file_path, base_path, config_dict, model_name, source_dir, now)
+
+    Returns:
+        {
+            'file_path': str (relative),
+            'chunks': list[dict] with vectors,
+            'mtime': float,
+            'error': str | None
+        }
+    """
+    file_path, base_path, config_dict, model_name, source_dir, now = args
+
+    try:
+        # Get or create embedder for this worker process
+        import os
+        pid = os.getpid()
+        if pid not in _worker_embedder_cache:
+            from semdex.embeddings import LocalEmbedder
+            _worker_embedder_cache[pid] = LocalEmbedder(model_name=model_name)
+        embedder = _worker_embedder_cache[pid]
+
+        # Calculate relative path
+        try:
+            rel_path = str(file_path.relative_to(base_path))
+        except ValueError:
+            rel_path = file_path.name
+
+        # Chunk the file
+        from semdex.chunker import chunk_file
+        chunks = chunk_file(file_path, threshold=config_dict["chunk_threshold"])
+
+        # Get file mtime
+        mtime = file_path.stat().st_mtime
+
+        # Build chunk dicts
+        file_chunks = []
+        for chunk in chunks:
+            file_chunks.append({
+                "file_path": rel_path,
+                "start_line": chunk.start_line,
+                "end_line": chunk.end_line,
+                "chunk_type": chunk.chunk_type,
+                "content": chunk.content,
+                "source_dir": source_dir,
+                "last_indexed": now,
+                "mtime": mtime,
+            })
+
+        # Generate embeddings
+        if file_chunks:
+            texts = [c["content"] for c in file_chunks]
+            vectors = embedder.encode(texts)
+            for chunk, vector in zip(file_chunks, vectors):
+                chunk["vector"] = vector
+
+        return {
+            "file_path": rel_path,
+            "chunks": file_chunks,
+            "mtime": mtime,
+            "error": None,
+        }
+
+    except Exception as e:
+        return {
+            "file_path": str(file_path),
+            "chunks": [],
+            "mtime": 0,
+            "error": str(e),
+        }
+
+
 def index_project(
     project_root: Path,
     config: SemdexConfig,
