@@ -13,6 +13,60 @@ from semdex.server import run_server
 from semdex.store import SemdexStore
 
 
+def _install_skill() -> bool:
+    """Install the semdex skill to Claude's skill directory.
+
+    Returns:
+        True if skill was installed or already exists, False on error
+    """
+    # Find Claude's skills directory
+    claude_home = Path.home() / ".claude"
+    skills_dir = claude_home / "skills"
+
+    if not skills_dir.exists():
+        click.echo("Claude skills directory not found. Skipping skill installation.", err=True)
+        click.echo("The skill will be available when you install Claude Code.", err=True)
+        return False
+
+    # Find the bundled skill in the package
+    try:
+        import semdex
+        semdex_module_path = Path(semdex.__file__).parent
+
+        # Try multiple possible locations for the skill
+        # 1. Installed package: site-packages/semdex-skill/
+        skill_source = semdex_module_path.parent / "semdex-skill"
+
+        # 2. Development install: src/semdex/../.. => project root
+        if not skill_source.exists():
+            # Go up to src/, then to project root
+            project_root = semdex_module_path.parent.parent
+            skill_source = project_root / "semdex-skill"
+
+        # 3. Alternative: skill bundled inside the package
+        if not skill_source.exists():
+            skill_source = semdex_module_path / "skill"
+
+        if not skill_source.exists():
+            click.echo("Warning: semdex skill not found in package", err=True)
+            return False
+    except Exception as e:
+        click.echo(f"Warning: Could not locate semdex skill: {e}", err=True)
+        return False
+
+    # Install skill
+    skill_dest = skills_dir / "semdex"
+
+    try:
+        if skill_dest.exists():
+            shutil.rmtree(skill_dest)
+        shutil.copytree(skill_source, skill_dest)
+        return True
+    except Exception as e:
+        click.echo(f"Warning: Could not install skill: {e}", err=True)
+        return False
+
+
 def _find_project_root() -> Path:
     """Find the project root (directory containing .git)."""
     cwd = Path.cwd()
@@ -60,6 +114,11 @@ def init():
         install_hook(root)
         click.echo("Installed post-commit hook")
 
+    # Install Claude skill
+    skill_installed = _install_skill()
+    if skill_installed:
+        click.echo("Installed semdex skill for Claude Code")
+
     # Print next steps
     click.echo("\n--- Next steps ---")
     click.echo("")
@@ -70,7 +129,11 @@ def init():
     click.echo("   claude mcp list")
     click.echo("")
     click.echo("3. Start a Claude Code session and ask it to search your project!")
-    click.echo("   Claude now has access to: search, related, summary tools")
+    if skill_installed:
+        click.echo("   Claude now has access to: search, related, summary tools")
+        click.echo("   The semdex skill teaches Claude to use these tools proactively")
+    else:
+        click.echo("   Claude now has access to: search, related, summary tools")
 
 
 @cli.command()

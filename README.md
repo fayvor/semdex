@@ -47,7 +47,7 @@ pip install -e ".[dev]"
 ```bash
 # 1. Initialize semdex in your project
 cd ~/your-project
-semdex init
+semdex init  # Builds index, installs git hook, and installs Claude skill
 
 # 2. Register the MCP server with Claude Code
 claude mcp add semdex -- semdex serve
@@ -56,12 +56,13 @@ claude mcp add semdex -- semdex serve
 claude mcp list
 
 # 4. Start a Claude Code session -- Claude now has search, related, and summary tools!
+# The semdex skill teaches Claude to use these tools proactively when exploring code
 ```
 
 ## CLI Commands
 
 ```bash
-semdex init                  # Initialize: index project, install git hook, print setup instructions
+semdex init                  # Initialize: index project, install git hook and skill, print setup instructions
 semdex index                 # Smart re-index (skip unchanged files, prune deleted files)
 semdex index --force         # Full re-index (delete and rebuild entire index)
 semdex index <dir>           # Index an external directory
@@ -87,11 +88,13 @@ By default, `semdex index` uses smart incremental indexing:
 
 ## Integration with Claude Code
 
-Once the MCP server is registered, Claude has access to three tools:
+Once the MCP server is registered and the skill is installed, Claude has access to three tools:
 
 - **`search`**: Semantic search across your codebase. Claude can find files by meaning, not just keywords.
 - **`related`**: Find files related to a given file. Useful when Claude is editing code and needs to find tests, models, or connected modules.
 - **`summary`**: Get index metadata for a file (chunk count, types, last indexed).
+
+The **semdex skill** teaches Claude to use these tools proactively when exploring unfamiliar code, investigating bugs, understanding architecture, and finding related files. The skill is automatically installed by `semdex init` and guides Claude on when and how to use semantic search effectively.
 
 ## Performance
 

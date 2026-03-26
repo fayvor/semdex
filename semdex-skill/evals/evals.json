@@ -1,0 +1,23 @@
+{
+  "skill_name": "semdex",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I need to find all the code related to user authentication in this project. Can you help me understand where the login flow is implemented?",
+      "expected_output": "Claude should use the semdex search tool with a query like 'user authentication login flow' to find relevant files, then summarize the findings",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "I'm looking at src/services/payment_processor.py and need to make some changes. Before I do, I want to make sure I understand what else might be affected. What files work with this payment code?",
+      "expected_output": "Claude should use the semdex related tool on src/services/payment_processor.py to find connected files (tests, dependencies, related services)",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "How does error handling work in this codebase? I'm trying to figure out the patterns people use here.",
+      "expected_output": "Claude should use semdex search with a query like 'error handling patterns' or 'exception handling' to find examples across the codebase",
+      "files": []
+    }
+  ]
+}
