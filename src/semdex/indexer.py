@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
+import signal
 from pathlib import Path
 
 import pathspec
 
 from semdex.config import SemdexConfig, DEFAULT_EXCLUDES, BINARY_EXTENSIONS
+from semdex.git import GitState, get_current_commit, is_ancestor, get_changed_files, is_git_repo
 
 
 def discover_files(
@@ -50,6 +53,45 @@ import click
 from semdex.chunker import chunk_file
 from semdex.embeddings import LocalEmbedder
 from semdex.store import SemdexStore
+
+
+class Checkpoint:
+    """Track indexing progress for resume after interruption.
+
+    Complements the store's mtime-based skip: the store only knows about files
+    that were flushed to DB. If indexing is interrupted mid-batch, those files
+    are lost. The checkpoint tracks what's been processed so a rerun skips them.
+    """
+
+    def __init__(self, path: Path):
+        self._path = path
+        self._data: dict = {"completed": {}, "version": 1}
+        self._load()
+
+    def _load(self):
+        if self._path.exists():
+            try:
+                self._data = json.loads(self._path.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    def save(self):
+        self._path.write_text(json.dumps(self._data))
+
+    def is_current(self, rel_path: str, mtime: float) -> bool:
+        """True if file was already indexed with the same mtime."""
+        entry = self._data["completed"].get(rel_path)
+        return entry is not None and entry.get("mtime") == mtime
+
+    def mark_done(self, rel_path: str, mtime: float):
+        self._data["completed"][rel_path] = {"mtime": mtime}
+
+    def clear(self):
+        self._data = {"completed": {}, "version": 1}
+
+    def remove(self):
+        if self._path.exists():
+            self._path.unlink()
 
 
 # Global cache for worker embedders (process-local)
@@ -138,6 +180,7 @@ def _index_parallel(
     base_path: Path,
     source_dir: str,
     now: str,
+    checkpoint: Checkpoint | None = None,
 ) -> dict:
     """Index files in parallel using process pool.
 
@@ -148,12 +191,22 @@ def _index_parallel(
         base_path: Base path for relative path calculation
         source_dir: Source directory string
         now: ISO timestamp string
+        checkpoint: Optional Checkpoint for resume support
 
     Returns:
-        Stats dict with files_indexed, files_failed, chunks_created
+        Stats dict with files_indexed, files_failed, chunks_created, interrupted
     """
     import os
     from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    interrupted = False
+
+    def _handle_signal(signum, frame):
+        nonlocal interrupted
+        interrupted = True
+
+    old_sigint = signal.signal(signal.SIGINT, _handle_signal)
+    old_sigterm = signal.signal(signal.SIGTERM, _handle_signal)
 
     # Determine worker count
     num_workers = config.parallel_workers
@@ -178,54 +231,68 @@ def _index_parallel(
     total_chunks = 0
     results_buffer = []
 
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        # Submit all files to pool
-        future_to_file = {
-            executor.submit(
-                _process_file_worker,
-                (f, base_path, config_dict, config.embedding_model, source_dir, now)
-            ): f
-            for f in sorted_files
-        }
+    def _flush():
+        nonlocal results_buffer
+        if results_buffer:
+            store.add_chunks(results_buffer)
+            results_buffer = []
+        if checkpoint:
+            checkpoint.save()
 
-        # Process results as they complete
-        with click.progressbar(
-            length=len(sorted_files),
-            label="Indexing",
-            show_pos=True
-        ) as bar:
-            for future in as_completed(future_to_file):
-                result = future.result()
+    try:
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            future_to_file = {
+                executor.submit(
+                    _process_file_worker,
+                    (f, base_path, config_dict, config.embedding_model, source_dir, now)
+                ): f
+                for f in sorted_files
+            }
 
-                if result["error"]:
-                    files_failed += 1
-                    click.echo(f"\nWarning: Failed to process {result['file_path']}: {result['error']}", err=True)
-                else:
-                    # Delete old chunks for this file before adding new ones
-                    store.delete_by_file(result["file_path"])
+            with click.progressbar(
+                length=len(sorted_files),
+                label="Indexing",
+                show_pos=True
+            ) as bar:
+                for future in as_completed(future_to_file):
+                    if interrupted:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
 
-                    # Add to buffer
-                    results_buffer.extend(result["chunks"])
-                    files_indexed += 1
-                    total_chunks += len(result["chunks"])
+                    result = future.result()
 
-                    # Batch write when buffer is full
-                    if len(results_buffer) >= config.write_batch_size:
-                        if results_buffer:
-                            store.add_chunks(results_buffer)
-                        results_buffer.clear()
+                    if result["error"]:
+                        files_failed += 1
+                        click.echo(f"\nWarning: Failed to process {result['file_path']}: {result['error']}", err=True)
+                    else:
+                        store.delete_by_file(result["file_path"])
+                        results_buffer.extend(result["chunks"])
+                        files_indexed += 1
+                        total_chunks += len(result["chunks"])
 
-                bar.update(1)
+                        if checkpoint:
+                            checkpoint.mark_done(result["file_path"], result["mtime"])
 
-            # Flush remaining results
-            if results_buffer:
-                store.add_chunks(results_buffer)
-                results_buffer.clear()
+                        if len(results_buffer) >= config.write_batch_size:
+                            _flush()
+
+                    bar.update(1)
+
+                _flush()
+    finally:
+        signal.signal(signal.SIGINT, old_sigint)
+        signal.signal(signal.SIGTERM, old_sigterm)
+        if checkpoint:
+            checkpoint.save()
+
+    if interrupted:
+        click.echo("\nInterrupted — progress saved. Run again to resume.")
 
     return {
         "files_indexed": files_indexed,
         "files_failed": files_failed,
         "chunks_created": total_chunks,
+        "interrupted": interrupted,
     }
 
 
@@ -236,8 +303,9 @@ def _index_sequential(
     base_path: Path,
     source_dir: str,
     now: str,
+    checkpoint: Checkpoint | None = None,
 ) -> dict:
-    """Index files sequentially (original implementation).
+    """Index files sequentially.
 
     Args:
         files: List of file paths to index
@@ -246,60 +314,79 @@ def _index_sequential(
         base_path: Base path for relative path calculation
         source_dir: Source directory string
         now: ISO timestamp string
+        checkpoint: Optional Checkpoint for resume support
 
     Returns:
-        Stats dict with files_indexed, chunks_created
+        Stats dict with files_indexed, chunks_created, interrupted
     """
-    # Create embedder once, reuse for all files
+    interrupted = False
+
+    def _handle_signal(signum, frame):
+        nonlocal interrupted
+        interrupted = True
+
+    old_sigint = signal.signal(signal.SIGINT, _handle_signal)
+    old_sigterm = signal.signal(signal.SIGTERM, _handle_signal)
+
     embedder = LocalEmbedder(model_name=config.embedding_model)
 
     total_chunks = 0
     files_indexed = 0
 
-    with click.progressbar(files, label="Indexing", length=len(files),
-                           item_show_func=lambda p: p.name if p else "") as bar:
-        for path in bar:
-            # Calculate relative path
-            try:
-                rel_path = str(path.relative_to(base_path))
-            except ValueError:
-                rel_path = str(path)
+    try:
+        with click.progressbar(files, label="Indexing", length=len(files),
+                               item_show_func=lambda p: p.name if p else "") as bar:
+            for path in bar:
+                if interrupted:
+                    break
 
-            # Delete old chunks for this file before re-indexing
-            store.delete_by_file(rel_path)
+                try:
+                    rel_path = str(path.relative_to(base_path))
+                except ValueError:
+                    rel_path = str(path)
 
-            # Chunk the file
-            chunks = chunk_file(path, threshold=config.chunk_threshold)
+                store.delete_by_file(rel_path)
 
-            # Get file mtime
-            mtime = path.stat().st_mtime
+                chunks = chunk_file(path, threshold=config.chunk_threshold)
+                mtime = path.stat().st_mtime
 
-            file_chunks = []
-            for chunk in chunks:
-                file_chunks.append({
-                    "file_path": rel_path,
-                    "start_line": chunk.start_line,
-                    "end_line": chunk.end_line,
-                    "chunk_type": chunk.chunk_type,
-                    "content": chunk.content,
-                    "source_dir": source_dir,
-                    "last_indexed": now,
-                    "mtime": mtime,
-                })
+                file_chunks = []
+                for chunk in chunks:
+                    file_chunks.append({
+                        "file_path": rel_path,
+                        "start_line": chunk.start_line,
+                        "end_line": chunk.end_line,
+                        "chunk_type": chunk.chunk_type,
+                        "content": chunk.content,
+                        "source_dir": source_dir,
+                        "last_indexed": now,
+                        "mtime": mtime,
+                    })
 
-            if file_chunks:
-                # Generate embeddings (reuse embedder)
-                texts = [c["content"] for c in file_chunks]
-                vectors = embedder.encode(texts)
-                for chunk, vector in zip(file_chunks, vectors):
-                    chunk["vector"] = vector
-                store.add_chunks(file_chunks)
-                total_chunks += len(file_chunks)
-                files_indexed += 1
+                if file_chunks:
+                    texts = [c["content"] for c in file_chunks]
+                    vectors = embedder.encode(texts)
+                    for chunk, vector in zip(file_chunks, vectors):
+                        chunk["vector"] = vector
+                    store.add_chunks(file_chunks)
+                    total_chunks += len(file_chunks)
+                    files_indexed += 1
+
+                if checkpoint:
+                    checkpoint.mark_done(rel_path, mtime)
+    finally:
+        signal.signal(signal.SIGINT, old_sigint)
+        signal.signal(signal.SIGTERM, old_sigterm)
+        if checkpoint:
+            checkpoint.save()
+
+    if interrupted:
+        click.echo("\nInterrupted — progress saved. Run again to resume.")
 
     return {
         "files_indexed": files_indexed,
         "chunks_created": total_chunks,
+        "interrupted": interrupted,
     }
 
 
@@ -312,36 +399,69 @@ def index_project(
 ) -> dict:
     """Index files and store embeddings. Returns stats dict."""
     store = SemdexStore(db_path=config.db_path, dimension=384)
+    checkpoint = Checkpoint(config.semdex_dir / "checkpoint.json")
+    git_state = GitState(config.state_path)
+    used_git_diff = False
+    files_to_delete: list[str] = []
 
     if target_dir:
-        # Index external directory — don't respect gitignore
         file_list = discover_files(target_dir, config, respect_gitignore=False)
         source_dir = str(target_dir.resolve())
-        # External dirs: apply skip logic unless force=True
         to_index, to_skip = _filter_files_by_mtime(file_list, store, force, target_dir)
+        base_path = target_dir
     elif files:
         file_list = files
         source_dir = str(project_root.resolve())
-        # Specific files: apply skip logic unless force=True
         to_index, to_skip = _filter_files_by_mtime(file_list, store, force, project_root)
+        base_path = project_root
     else:
-        # Full project scan
+        # Full project scan — try git diff first, fall back to mtime
         file_list = discover_files(project_root, config)
         source_dir = str(project_root.resolve())
-        # Apply skip logic unless force=True
-        to_index, to_skip = _filter_files_by_mtime(file_list, store, force, project_root)
+        base_path = project_root
+
+        current_commit = get_current_commit(project_root) if is_git_repo(project_root) else None
+        last_commit = git_state.last_indexed_commit
+
+        if (
+            not force
+            and current_commit
+            and last_commit
+            and is_ancestor(project_root, last_commit, current_commit)
+        ):
+            # Git history is linear, use git diff for precision
+            to_index, to_skip, files_to_delete = _filter_files_by_git(
+                file_list, store, project_root, last_commit, current_commit
+            )
+            used_git_diff = True
+        else:
+            # Fall back to mtime: force mode, no git, no prior commit, or history diverged
+            to_index, to_skip = _filter_files_by_mtime(file_list, store, force, project_root)
+
+    # Further filter using checkpoint (covers files processed but not yet flushed to DB)
+    if not force:
+        checkpoint_skipped = []
+        checkpoint_remaining = []
+        for f in to_index:
+            try:
+                rel = str(f.relative_to(base_path))
+            except ValueError:
+                rel = f.name
+            try:
+                mtime = f.stat().st_mtime
+            except OSError:
+                continue
+            if checkpoint.is_current(rel, mtime):
+                checkpoint_skipped.append(f)
+            else:
+                checkpoint_remaining.append(f)
+        to_skip = to_skip + checkpoint_skipped
+        to_index = checkpoint_remaining
 
     now = datetime.now(timezone.utc).isoformat()
     total_files = len(file_list)
     files_skipped = len(to_skip)
 
-    # Determine base_path for relative path calculation
-    if target_dir:
-        base_path = target_dir
-    else:
-        base_path = project_root
-
-    # Choose parallel or sequential path
     use_parallel = (
         config.parallel_enabled
         and len(to_index) >= config.min_files_for_parallel
@@ -349,17 +469,34 @@ def index_project(
 
     if use_parallel:
         index_stats = _index_parallel(
-            to_index, store, config, base_path, source_dir, now
+            to_index, store, config, base_path, source_dir, now, checkpoint
         )
     else:
         index_stats = _index_sequential(
-            to_index, store, config, base_path, source_dir, now
+            to_index, store, config, base_path, source_dir, now, checkpoint
         )
 
-    # Pruning: only for full project scans (no target specified)
+    was_interrupted = index_stats.get("interrupted", False)
+
+    # Handle deleted files
     files_deleted = 0
-    if not target_dir and not files:
-        files_deleted = _prune_deleted_files(file_list, store, source_dir, base_path)
+    if not was_interrupted:
+        if used_git_diff:
+            # Git told us exactly what was deleted
+            for rel_path in files_to_delete:
+                store.delete_by_file(rel_path)
+            files_deleted = len(files_to_delete)
+        elif not target_dir and not files:
+            # Mtime mode: scan for files no longer present
+            files_deleted = _prune_deleted_files(file_list, store, source_dir, base_path)
+
+    # Update git state after successful indexing (full project only)
+    if not was_interrupted and not target_dir and not files:
+        current_commit = get_current_commit(project_root) if is_git_repo(project_root) else None
+        if current_commit:
+            git_state.last_indexed_commit = current_commit
+            git_state.save()
+        checkpoint.remove()
 
     return {
         "files_discovered": total_files,
@@ -368,6 +505,8 @@ def index_project(
         "files_failed": index_stats.get("files_failed", 0),
         "files_deleted": files_deleted,
         "chunks_created": index_stats["chunks_created"],
+        "interrupted": was_interrupted,
+        "used_git_diff": used_git_diff,
     }
 
 
@@ -422,6 +561,47 @@ def _filter_files_by_mtime(
         to_index.append(file_path)
 
     return (to_index, to_skip)
+
+
+def _filter_files_by_git(
+    all_files: list[Path],
+    store: SemdexStore,
+    project_root: Path,
+    last_commit: str,
+    current_commit: str,
+) -> tuple[list[Path], list[Path], list[str]]:
+    """Filter files based on git diff, returning (to_index, to_skip, to_delete).
+
+    Args:
+        all_files: All discovered files in the project
+        store: SemdexStore instance
+        project_root: Project root path
+        last_commit: Last indexed commit SHA
+        current_commit: Current HEAD commit SHA
+
+    Returns:
+        (files_to_index, files_to_skip, files_to_delete)
+    """
+    modified_or_added, deleted = get_changed_files(project_root, last_commit, current_commit)
+
+    # Convert to sets for fast lookup
+    changed_set = set(modified_or_added)
+
+    to_index = []
+    to_skip = []
+
+    for file_path in all_files:
+        try:
+            rel_path = str(file_path.relative_to(project_root))
+        except ValueError:
+            rel_path = file_path.name
+
+        if rel_path in changed_set:
+            to_index.append(file_path)
+        else:
+            to_skip.append(file_path)
+
+    return (to_index, to_skip, deleted)
 
 
 def _prune_deleted_files(
