@@ -7,6 +7,7 @@ from pathlib import Path
 import pathspec
 
 from semdex.config import SemdexConfig, DEFAULT_EXCLUDES, BINARY_EXTENSIONS
+from semdex.git import GitState, get_current_commit, is_ancestor, get_changed_files, is_git_repo
 
 
 def discover_files(
@@ -399,6 +400,9 @@ def index_project(
     """Index files and store embeddings. Returns stats dict."""
     store = SemdexStore(db_path=config.db_path, dimension=384)
     checkpoint = Checkpoint(config.semdex_dir / "checkpoint.json")
+    git_state = GitState(config.state_path)
+    used_git_diff = False
+    files_to_delete: list[str] = []
 
     if target_dir:
         file_list = discover_files(target_dir, config, respect_gitignore=False)
@@ -411,10 +415,28 @@ def index_project(
         to_index, to_skip = _filter_files_by_mtime(file_list, store, force, project_root)
         base_path = project_root
     else:
+        # Full project scan — try git diff first, fall back to mtime
         file_list = discover_files(project_root, config)
         source_dir = str(project_root.resolve())
-        to_index, to_skip = _filter_files_by_mtime(file_list, store, force, project_root)
         base_path = project_root
+
+        current_commit = get_current_commit(project_root) if is_git_repo(project_root) else None
+        last_commit = git_state.last_indexed_commit
+
+        if (
+            not force
+            and current_commit
+            and last_commit
+            and is_ancestor(project_root, last_commit, current_commit)
+        ):
+            # Git history is linear, use git diff for precision
+            to_index, to_skip, files_to_delete = _filter_files_by_git(
+                file_list, store, project_root, last_commit, current_commit
+            )
+            used_git_diff = True
+        else:
+            # Fall back to mtime: force mode, no git, no prior commit, or history diverged
+            to_index, to_skip = _filter_files_by_mtime(file_list, store, force, project_root)
 
     # Further filter using checkpoint (covers files processed but not yet flushed to DB)
     if not force:
@@ -456,13 +478,24 @@ def index_project(
 
     was_interrupted = index_stats.get("interrupted", False)
 
-    # Pruning: only for full project scans that completed
+    # Handle deleted files
     files_deleted = 0
-    if not target_dir and not files and not was_interrupted:
-        files_deleted = _prune_deleted_files(file_list, store, source_dir, base_path)
+    if not was_interrupted:
+        if used_git_diff:
+            # Git told us exactly what was deleted
+            for rel_path in files_to_delete:
+                store.delete_by_file(rel_path)
+            files_deleted = len(files_to_delete)
+        elif not target_dir and not files:
+            # Mtime mode: scan for files no longer present
+            files_deleted = _prune_deleted_files(file_list, store, source_dir, base_path)
 
-    # Clean up checkpoint on successful full completion
-    if not was_interrupted and not files and not target_dir:
+    # Update git state after successful indexing (full project only)
+    if not was_interrupted and not target_dir and not files:
+        current_commit = get_current_commit(project_root) if is_git_repo(project_root) else None
+        if current_commit:
+            git_state.last_indexed_commit = current_commit
+            git_state.save()
         checkpoint.remove()
 
     return {
@@ -473,6 +506,7 @@ def index_project(
         "files_deleted": files_deleted,
         "chunks_created": index_stats["chunks_created"],
         "interrupted": was_interrupted,
+        "used_git_diff": used_git_diff,
     }
 
 
@@ -527,6 +561,47 @@ def _filter_files_by_mtime(
         to_index.append(file_path)
 
     return (to_index, to_skip)
+
+
+def _filter_files_by_git(
+    all_files: list[Path],
+    store: SemdexStore,
+    project_root: Path,
+    last_commit: str,
+    current_commit: str,
+) -> tuple[list[Path], list[Path], list[str]]:
+    """Filter files based on git diff, returning (to_index, to_skip, to_delete).
+
+    Args:
+        all_files: All discovered files in the project
+        store: SemdexStore instance
+        project_root: Project root path
+        last_commit: Last indexed commit SHA
+        current_commit: Current HEAD commit SHA
+
+    Returns:
+        (files_to_index, files_to_skip, files_to_delete)
+    """
+    modified_or_added, deleted = get_changed_files(project_root, last_commit, current_commit)
+
+    # Convert to sets for fast lookup
+    changed_set = set(modified_or_added)
+
+    to_index = []
+    to_skip = []
+
+    for file_path in all_files:
+        try:
+            rel_path = str(file_path.relative_to(project_root))
+        except ValueError:
+            rel_path = file_path.name
+
+        if rel_path in changed_set:
+            to_index.append(file_path)
+        else:
+            to_skip.append(file_path)
+
+    return (to_index, to_skip, deleted)
 
 
 def _prune_deleted_files(

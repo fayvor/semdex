@@ -172,9 +172,10 @@ def index(target, force):
     # Display results
     skipped = stats.get("files_skipped", 0)
     deleted = stats.get("files_deleted", 0)
+    method = "git diff" if stats.get("used_git_diff") else "mtime"
     if skipped > 0 or deleted > 0:
         click.echo(f"Processed {stats['files_discovered']} files "
-                   f"({skipped} skipped, {stats['files_indexed']} indexed, {deleted} deleted)")
+                   f"({skipped} skipped, {stats['files_indexed']} indexed, {deleted} deleted) [{method}]")
     click.echo(f"Indexed {stats['files_indexed']} files ({stats['chunks_created']} chunks)")
 
 
@@ -214,6 +215,8 @@ def serve():
 @cli.command()
 def status():
     """Show index statistics."""
+    from semdex.git import GitState, get_current_commit
+
     root = _find_project_root()
     config = SemdexConfig.load(root)
 
@@ -223,9 +226,21 @@ def status():
 
     store = SemdexStore(db_path=config.db_path)
     stats = store.stats()
+    git_state = GitState(config.state_path)
+
     click.echo(f"Files indexed: {stats['total_files']}")
     click.echo(f"Total chunks:  {stats['total_chunks']}")
     click.echo(f"Last indexed:  {stats['last_indexed']}")
+
+    last_commit = git_state.last_indexed_commit
+    if last_commit:
+        click.echo(f"Last commit:   {last_commit[:12]}")
+        current = get_current_commit(root)
+        if current and current != last_commit:
+            click.echo(f"Current HEAD:  {current[:12]} (index may be stale)")
+        elif current:
+            click.echo(f"Current HEAD:  {current[:12]} (up to date)")
+
     click.echo(f"Index path:    {config.semdex_dir}")
 
 

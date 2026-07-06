@@ -1,9 +1,11 @@
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 from semdex.config import SemdexConfig
 from semdex.indexer import index_project, Checkpoint
+from semdex.git import GitState, get_current_commit
 
 
 def test_index_project_end_to_end():
@@ -216,3 +218,120 @@ def test_checkpoint_not_cleaned_up_for_specific_files():
         stats = index_project(root, config, files=[root / "a.py"])
         # Checkpoint should still exist (not cleaned up for partial runs)
         assert (config.semdex_dir / "checkpoint.json").exists()
+
+
+def _init_git_repo(path: Path) -> None:
+    """Initialize a git repo with an initial commit."""
+    subprocess.run(["git", "init"], cwd=path, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=path, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=path, capture_output=True)
+    (path / "README.md").write_text("# Test")
+    subprocess.run(["git", "add", "."], cwd=path, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=path, capture_output=True)
+
+
+def test_index_uses_git_diff_when_available():
+    """Index should use git diff when prior commit is tracked."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        _init_git_repo(root)
+
+        (root / "file1.py").write_text("x = 1")
+        subprocess.run(["git", "add", "."], cwd=root, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Add file1"], cwd=root, capture_output=True)
+
+        config = SemdexConfig(project_root=root)
+        config.ensure_dirs()
+
+        # First index
+        stats1 = index_project(root, config)
+        assert stats1["files_indexed"] >= 1
+        assert stats1.get("used_git_diff") is False  # No prior commit
+
+        # Verify commit was saved
+        git_state = GitState(config.state_path)
+        assert git_state.last_indexed_commit is not None
+
+        # Add another file and commit
+        (root / "file2.py").write_text("y = 2")
+        subprocess.run(["git", "add", "."], cwd=root, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Add file2"], cwd=root, capture_output=True)
+
+        # Second index should use git diff
+        stats2 = index_project(root, config)
+        assert stats2["used_git_diff"] is True
+        assert stats2["files_indexed"] == 1  # Only file2
+        assert stats2["files_skipped"] >= 1  # file1 and README
+
+
+def test_index_falls_back_to_mtime_without_git():
+    """Index should use mtime when not in a git repo."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        (root / "file1.py").write_text("x = 1")
+
+        config = SemdexConfig(project_root=root)
+        config.ensure_dirs()
+
+        stats = index_project(root, config)
+        assert stats["files_indexed"] == 1
+        assert stats.get("used_git_diff") is False
+
+
+def test_index_detects_deleted_files_via_git():
+    """Index should detect and remove deleted files via git diff."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        _init_git_repo(root)
+
+        (root / "keep.py").write_text("x = 1")
+        (root / "delete_me.py").write_text("y = 2")
+        subprocess.run(["git", "add", "."], cwd=root, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Add files"], cwd=root, capture_output=True)
+
+        config = SemdexConfig(project_root=root)
+        config.ensure_dirs()
+
+        # First index
+        stats1 = index_project(root, config)
+        assert stats1["files_indexed"] >= 2
+
+        # Delete file and commit
+        (root / "delete_me.py").unlink()
+        subprocess.run(["git", "add", "."], cwd=root, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Delete file"], cwd=root, capture_output=True)
+
+        # Second index should detect deletion
+        stats2 = index_project(root, config)
+        assert stats2["used_git_diff"] is True
+        assert stats2["files_deleted"] == 1
+
+
+def test_index_falls_back_on_history_divergence():
+    """Index should fall back to mtime when git history has diverged."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        _init_git_repo(root)
+
+        (root / "file1.py").write_text("x = 1")
+        subprocess.run(["git", "add", "."], cwd=root, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Add file1"], cwd=root, capture_output=True)
+
+        config = SemdexConfig(project_root=root)
+        config.ensure_dirs()
+
+        # First index
+        stats1 = index_project(root, config)
+        stored_commit = get_current_commit(root)
+
+        # Simulate history divergence by resetting to initial commit
+        subprocess.run(["git", "reset", "--hard", "HEAD~1"], cwd=root, capture_output=True)
+
+        # Create a different commit
+        (root / "file2.py").write_text("y = 2")
+        subprocess.run(["git", "add", "."], cwd=root, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Different branch"], cwd=root, capture_output=True)
+
+        # Index should fall back to mtime since stored commit is not ancestor
+        stats2 = index_project(root, config)
+        assert stats2["used_git_diff"] is False

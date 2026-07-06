@@ -59,6 +59,10 @@ class SemdexConfig:
     def hook_log_path(self) -> Path:
         return self.semdex_dir / "hook.log"
 
+    @property
+    def state_path(self) -> Path:
+        return self.semdex_dir / "state.json"
+
     def ensure_dirs(self) -> None:
         self.semdex_dir.mkdir(parents=True, exist_ok=True)
 
