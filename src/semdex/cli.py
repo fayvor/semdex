@@ -307,3 +307,76 @@ def hook_uninstall():
     root = _find_project_root()
     uninstall_hook(root)
     click.echo("Post-commit hook removed")
+
+
+@cli.command()
+@click.argument("source_path")
+def merge(source_path):
+    """Merge another semdex index into this one.
+
+    SOURCE_PATH can be:
+    - A project directory containing .claude/semdex/
+    - A direct path to a lance.db directory
+    """
+    from semdex.git import GitState
+
+    root = _find_project_root()
+    config = SemdexConfig.load(root)
+    config.ensure_dirs()
+    _ensure_gitignore(root)
+
+    source = Path(source_path).resolve()
+
+    # Find the source lance.db
+    if (source / ".claude" / "semdex" / "lance.db").exists():
+        source_db = source / ".claude" / "semdex" / "lance.db"
+        source_state = source / ".claude" / "semdex" / "state.json"
+    elif (source / "lance.db").exists():
+        source_db = source / "lance.db"
+        source_state = source.parent / "state.json"
+    elif source.name == "lance.db" and source.exists():
+        source_db = source
+        source_state = source.parent / "state.json"
+    else:
+        click.echo(f"Error: Could not find semdex index at {source_path}", err=True)
+        click.echo("Expected: project/.claude/semdex/lance.db or direct path to lance.db")
+        raise SystemExit(1)
+
+    click.echo(f"Merging from: {source_db}")
+
+    # Open stores
+    dest_store = SemdexStore(db_path=config.db_path)
+    source_store = SemdexStore(db_path=source_db)
+
+    # Merge chunks
+    stats = dest_store.merge_from(source_store)
+
+    click.echo(f"Merged {stats['files_merged']} files ({stats['chunks_merged']} chunks) "
+               f"from {stats['source_dirs_merged']} source(s)")
+
+    # Merge git state if available
+    if source_state.exists():
+        dest_git_state = GitState(config.state_path)
+        source_git_state = GitState(source_state)
+
+        merged_sources = 0
+        # Handle new format (per-source)
+        if hasattr(source_git_state, '_data') and 'sources' in source_git_state._data:
+            for source_dir, data in source_git_state._data['sources'].items():
+                if source_dir != "_default":
+                    dest_git_state.set_commit(data.get('commit'), source_dir)
+                    merged_sources += 1
+
+        # Handle old format (single commit) - associate with the source project path
+        if hasattr(source_git_state, '_data') and 'last_indexed_commit' in source_git_state._data:
+            old_commit = source_git_state._data['last_indexed_commit']
+            # Find the source_dir from merged chunks (the project that was indexed)
+            source_dirs = source_store.get_source_dirs()
+            for sd in source_dirs:
+                if dest_git_state.get_commit(sd) is None:
+                    dest_git_state.set_commit(old_commit, sd)
+                    merged_sources += 1
+
+        if merged_sources > 0:
+            dest_git_state.save()
+            click.echo(f"Merged git state for {merged_sources} source(s)")

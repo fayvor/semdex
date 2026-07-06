@@ -204,3 +204,62 @@ class SemdexStore:
             source_files[source_dir].add(file_path)
 
         return {sd: len(files) for sd, files in source_files.items()}
+
+    def get_all_chunks(self) -> list[dict]:
+        """Get all chunks from the store.
+
+        Returns:
+            List of chunk dictionaries with all fields
+        """
+        table = self._get_table()
+        if table is None:
+            return []
+
+        arrow_table = table.to_arrow()
+        columns = arrow_table.column_names
+
+        chunks = []
+        for i in range(arrow_table.num_rows):
+            chunk = {}
+            for col in columns:
+                val = arrow_table.column(col)[i].as_py()
+                # Convert numpy arrays to lists for vectors
+                if hasattr(val, 'tolist'):
+                    val = val.tolist()
+                chunk[col] = val
+            chunks.append(chunk)
+
+        return chunks
+
+    def merge_from(self, source_store: "SemdexStore") -> dict:
+        """Merge chunks from another store into this one.
+
+        Args:
+            source_store: The store to merge from
+
+        Returns:
+            Stats dict with chunks_merged, files_merged, source_dirs_merged
+        """
+        source_chunks = source_store.get_all_chunks()
+        if not source_chunks:
+            return {"chunks_merged": 0, "files_merged": 0, "source_dirs_merged": 0}
+
+        # Track what we're merging
+        files = set()
+        source_dirs = set()
+        for chunk in source_chunks:
+            files.add(chunk.get("file_path"))
+            source_dirs.add(chunk.get("source_dir"))
+
+        # Delete existing data for these source_dirs to avoid duplicates
+        for source_dir in source_dirs:
+            self.delete_by_source_dir(source_dir)
+
+        # Add all chunks
+        self.add_chunks(source_chunks)
+
+        return {
+            "chunks_merged": len(source_chunks),
+            "files_merged": len(files),
+            "source_dirs_merged": len(source_dirs),
+        }
