@@ -181,3 +181,26 @@ class SemdexStore:
             "total_files": len(file_paths),
             "last_indexed": last_indexed,
         }
+
+    def get_source_dirs(self) -> dict[str, int]:
+        """Get all source directories and their file counts.
+
+        Returns:
+            Dictionary mapping source_dir -> file count
+        """
+        table = self._get_table()
+        if table is None:
+            return {}
+
+        arrow_table = table.to_arrow()
+        source_dirs = arrow_table.column("source_dir").to_pylist()
+        file_paths = arrow_table.column("file_path").to_pylist()
+
+        # Count unique files per source_dir
+        source_files: dict[str, set] = {}
+        for source_dir, file_path in zip(source_dirs, file_paths):
+            if source_dir not in source_files:
+                source_files[source_dir] = set()
+            source_files[source_dir].add(file_path)
+
+        return {sd: len(files) for sd, files in source_files.items()}

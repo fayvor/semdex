@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 class GitState:
-    """Track git state for incremental indexing."""
+    """Track git state for incremental indexing, per source directory."""
 
     def __init__(self, state_path: Path):
         self._path = state_path
@@ -19,21 +19,40 @@ class GitState:
                 self._data = json.loads(self._path.read_text())
             except (json.JSONDecodeError, OSError):
                 self._data = {}
+        # Migrate old format (single commit) to new format (per-source)
+        if "last_indexed_commit" in self._data and "sources" not in self._data:
+            old_commit = self._data.pop("last_indexed_commit")
+            self._data["sources"] = {"_default": {"commit": old_commit}}
 
     def save(self):
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_text(json.dumps(self._data, indent=2))
 
+    def get_commit(self, source_dir: str | None = None) -> str | None:
+        """Get last indexed commit for a source directory."""
+        key = source_dir or "_default"
+        sources = self._data.get("sources", {})
+        entry = sources.get(key, {})
+        return entry.get("commit")
+
+    def set_commit(self, commit: str | None, source_dir: str | None = None):
+        """Set last indexed commit for a source directory."""
+        key = source_dir or "_default"
+        if "sources" not in self._data:
+            self._data["sources"] = {}
+        if commit is None:
+            self._data["sources"].pop(key, None)
+        else:
+            self._data["sources"][key] = {"commit": commit}
+
+    # Legacy property for backwards compatibility
     @property
     def last_indexed_commit(self) -> str | None:
-        return self._data.get("last_indexed_commit")
+        return self.get_commit()
 
     @last_indexed_commit.setter
     def last_indexed_commit(self, commit: str | None):
-        if commit is None:
-            self._data.pop("last_indexed_commit", None)
-        else:
-            self._data["last_indexed_commit"] = commit
+        self.set_commit(commit)
 
 
 def get_current_commit(repo_root: Path) -> str | None:

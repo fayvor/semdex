@@ -27,9 +27,47 @@ class TestGitState:
     def test_load_nonexistent(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = GitState(Path(tmpdir) / "state.json")
-            assert state.last_indexed_commit is None
+            assert state.get_commit() is None
+            assert state.get_commit("/some/path") is None
 
-    def test_save_and_load(self):
+    def test_save_and_load_default(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "state.json"
+            state = GitState(state_path)
+            state.set_commit("abc123")
+            state.save()
+
+            state2 = GitState(state_path)
+            assert state2.get_commit() == "abc123"
+
+    def test_save_and_load_per_source(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "state.json"
+            state = GitState(state_path)
+            state.set_commit("abc123", "/repo/one")
+            state.set_commit("def456", "/repo/two")
+            state.save()
+
+            state2 = GitState(state_path)
+            assert state2.get_commit("/repo/one") == "abc123"
+            assert state2.get_commit("/repo/two") == "def456"
+            assert state2.get_commit("/repo/three") is None
+
+    def test_clear_commit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "state.json"
+            state = GitState(state_path)
+            state.set_commit("abc123", "/repo/one")
+            state.save()
+
+            state.set_commit(None, "/repo/one")
+            state.save()
+
+            state2 = GitState(state_path)
+            assert state2.get_commit("/repo/one") is None
+
+    def test_legacy_property_compat(self):
+        """Legacy last_indexed_commit property works with _default key."""
         with tempfile.TemporaryDirectory() as tmpdir:
             state_path = Path(tmpdir) / "state.json"
             state = GitState(state_path)
@@ -38,19 +76,18 @@ class TestGitState:
 
             state2 = GitState(state_path)
             assert state2.last_indexed_commit == "abc123"
+            assert state2.get_commit() == "abc123"
 
-    def test_clear_commit(self):
+    def test_migrates_old_format(self):
+        """Old single-commit format is migrated to per-source format."""
         with tempfile.TemporaryDirectory() as tmpdir:
             state_path = Path(tmpdir) / "state.json"
+            # Write old format directly
+            state_path.write_text('{"last_indexed_commit": "old123"}')
+
             state = GitState(state_path)
-            state.last_indexed_commit = "abc123"
-            state.save()
-
-            state.last_indexed_commit = None
-            state.save()
-
-            state2 = GitState(state_path)
-            assert state2.last_indexed_commit is None
+            assert state.get_commit() == "old123"
+            assert state.last_indexed_commit == "old123"
 
 
 class TestGitCommands:

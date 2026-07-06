@@ -248,9 +248,10 @@ def test_index_uses_git_diff_when_available():
         assert stats1["files_indexed"] >= 1
         assert stats1.get("used_git_diff") is False  # No prior commit
 
-        # Verify commit was saved
+        # Verify commit was saved (keyed by source_dir)
         git_state = GitState(config.state_path)
-        assert git_state.last_indexed_commit is not None
+        source_dir = str(root.resolve())
+        assert git_state.get_commit(source_dir) is not None
 
         # Add another file and commit
         (root / "file2.py").write_text("y = 2")

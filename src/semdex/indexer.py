@@ -407,36 +407,38 @@ def index_project(
     if target_dir:
         file_list = discover_files(target_dir, config, respect_gitignore=False)
         source_dir = str(target_dir.resolve())
-        to_index, to_skip = _filter_files_by_mtime(file_list, store, force, target_dir)
         base_path = target_dir
+        git_root = target_dir
     elif files:
         file_list = files
         source_dir = str(project_root.resolve())
-        to_index, to_skip = _filter_files_by_mtime(file_list, store, force, project_root)
         base_path = project_root
+        git_root = project_root
     else:
-        # Full project scan — try git diff first, fall back to mtime
         file_list = discover_files(project_root, config)
         source_dir = str(project_root.resolve())
         base_path = project_root
+        git_root = project_root
 
-        current_commit = get_current_commit(project_root) if is_git_repo(project_root) else None
-        last_commit = git_state.last_indexed_commit
+    # Try git diff first, fall back to mtime
+    current_commit = get_current_commit(git_root) if is_git_repo(git_root) else None
+    last_commit = git_state.get_commit(source_dir)
 
-        if (
-            not force
-            and current_commit
-            and last_commit
-            and is_ancestor(project_root, last_commit, current_commit)
-        ):
-            # Git history is linear, use git diff for precision
-            to_index, to_skip, files_to_delete = _filter_files_by_git(
-                file_list, store, project_root, last_commit, current_commit
-            )
-            used_git_diff = True
-        else:
-            # Fall back to mtime: force mode, no git, no prior commit, or history diverged
-            to_index, to_skip = _filter_files_by_mtime(file_list, store, force, project_root)
+    if (
+        not force
+        and not files  # Can't use git diff for specific file lists
+        and current_commit
+        and last_commit
+        and is_ancestor(git_root, last_commit, current_commit)
+    ):
+        # Git history is linear, use git diff for precision
+        to_index, to_skip, files_to_delete = _filter_files_by_git(
+            file_list, store, git_root, last_commit, current_commit
+        )
+        used_git_diff = True
+    else:
+        # Fall back to mtime: force mode, no git, no prior commit, history diverged, or specific files
+        to_index, to_skip = _filter_files_by_mtime(file_list, store, force, base_path)
 
     # Further filter using checkpoint (covers files processed but not yet flushed to DB)
     if not force:
@@ -480,23 +482,24 @@ def index_project(
 
     # Handle deleted files
     files_deleted = 0
-    if not was_interrupted:
+    if not was_interrupted and not files:
         if used_git_diff:
             # Git told us exactly what was deleted
             for rel_path in files_to_delete:
                 store.delete_by_file(rel_path)
             files_deleted = len(files_to_delete)
-        elif not target_dir and not files:
+        else:
             # Mtime mode: scan for files no longer present
             files_deleted = _prune_deleted_files(file_list, store, source_dir, base_path)
 
-    # Update git state after successful indexing (full project only)
-    if not was_interrupted and not target_dir and not files:
-        current_commit = get_current_commit(project_root) if is_git_repo(project_root) else None
+    # Update git state after successful indexing (not for specific file lists)
+    if not was_interrupted and not files:
+        current_commit = get_current_commit(git_root) if is_git_repo(git_root) else None
         if current_commit:
-            git_state.last_indexed_commit = current_commit
+            git_state.set_commit(current_commit, source_dir)
             git_state.save()
-        checkpoint.remove()
+        if not target_dir:
+            checkpoint.remove()
 
     return {
         "files_discovered": total_files,

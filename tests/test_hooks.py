@@ -48,3 +48,21 @@ def test_install_hook_is_idempotent():
         install_hook(Path(tmpdir))
         content = (hooks_dir / "post-commit").read_text()
         assert content.count(HOOK_MARKER) == 2  # start and end markers only
+
+
+def test_install_hook_for_external_repo():
+    """External repo hook calls back to controller project."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        controller = Path(tmpdir) / "main-project"
+        external = Path(tmpdir) / "external-repo"
+        controller.mkdir()
+        (external / ".git" / "hooks").mkdir(parents=True)
+
+        install_hook(external, controller_dir=controller)
+
+        hook_file = external / ".git" / "hooks" / "post-commit"
+        assert hook_file.exists()
+        content = hook_file.read_text()
+        assert HOOK_MARKER in content
+        assert str(controller.resolve()) in content
+        assert "semdex index" in content

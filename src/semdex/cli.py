@@ -76,6 +76,21 @@ def _find_project_root() -> Path:
     return cwd
 
 
+def _ensure_gitignore(root: Path) -> bool:
+    """Ensure .claude/ is in .gitignore. Returns True if modified."""
+    gitignore = root / ".gitignore"
+    if gitignore.exists():
+        content = gitignore.read_text()
+        if ".claude/" not in content:
+            with open(gitignore, "a") as f:
+                f.write("\n.claude/\n")
+            return True
+    else:
+        gitignore.write_text(".claude/\n")
+        return True
+    return False
+
+
 @click.group()
 def cli():
     """semdex - A semantic project indexer for Claude."""
@@ -89,17 +104,8 @@ def init():
     config = SemdexConfig(project_root=root)
     config.ensure_dirs()
 
-    # Add .claude/ to .gitignore
-    gitignore = root / ".gitignore"
-    if gitignore.exists():
-        content = gitignore.read_text()
-        if ".claude/" not in content:
-            with open(gitignore, "a") as f:
-                f.write("\n.claude/\n")
-            click.echo("Added .claude/ to .gitignore")
-    else:
-        gitignore.write_text(".claude/\n")
-        click.echo("Created .gitignore with .claude/")
+    if _ensure_gitignore(root):
+        click.echo("Added .claude/ to .gitignore")
 
     # Save config
     config.save()
@@ -144,6 +150,7 @@ def index(target, force):
     root = _find_project_root()
     config = SemdexConfig.load(root)
     config.ensure_dirs()
+    _ensure_gitignore(root)
 
     if force and not target:
         # Full project + force: nuclear option - wipe and rebuild
@@ -158,6 +165,10 @@ def index(target, force):
         if target_path.is_dir():
             click.echo(f"Indexing directory: {target_path}")
             stats = index_project(root, config, target_dir=target_path, force=force)
+            # Install hook in external repo if it's a git repo
+            if (target_path / ".git").is_dir() and target_path != root:
+                install_hook(target_path, controller_dir=root)
+                click.echo(f"Installed hook in {target_path.name} -> {root}")
         elif target_path.is_file():
             click.echo(f"Indexing file: {target_path}")
             stats = index_project(root, config, files=[target_path], force=force)
@@ -215,7 +226,7 @@ def serve():
 @cli.command()
 def status():
     """Show index statistics."""
-    from semdex.git import GitState, get_current_commit
+    from semdex.git import GitState, get_current_commit, is_git_repo
 
     root = _find_project_root()
     config = SemdexConfig.load(root)
@@ -227,21 +238,32 @@ def status():
     store = SemdexStore(db_path=config.db_path)
     stats = store.stats()
     git_state = GitState(config.state_path)
+    source_dirs = store.get_source_dirs()
 
     click.echo(f"Files indexed: {stats['total_files']}")
     click.echo(f"Total chunks:  {stats['total_chunks']}")
     click.echo(f"Last indexed:  {stats['last_indexed']}")
-
-    last_commit = git_state.last_indexed_commit
-    if last_commit:
-        click.echo(f"Last commit:   {last_commit[:12]}")
-        current = get_current_commit(root)
-        if current and current != last_commit:
-            click.echo(f"Current HEAD:  {current[:12]} (index may be stale)")
-        elif current:
-            click.echo(f"Current HEAD:  {current[:12]} (up to date)")
-
     click.echo(f"Index path:    {config.semdex_dir}")
+
+    if source_dirs:
+        click.echo(f"\nSources ({len(source_dirs)}):")
+        for source_dir, file_count in sorted(source_dirs.items()):
+            source_path = Path(source_dir)
+            last_commit = git_state.get_commit(source_dir)
+
+            # Check if source is a git repo and get current commit
+            status_str = ""
+            if is_git_repo(source_path):
+                current = get_current_commit(source_path)
+                if last_commit and current:
+                    if current == last_commit:
+                        status_str = f" [{last_commit[:8]}]"
+                    else:
+                        status_str = f" [{last_commit[:8]} -> {current[:8]} stale]"
+                elif current:
+                    status_str = " [not tracked]"
+
+            click.echo(f"  {source_dir} ({file_count} files){status_str}")
 
 
 @cli.command()
