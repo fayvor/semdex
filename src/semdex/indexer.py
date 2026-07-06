@@ -10,10 +10,56 @@ from semdex.config import SemdexConfig, DEFAULT_EXCLUDES, BINARY_EXTENSIONS
 from semdex.git import GitState, get_current_commit, is_ancestor, get_changed_files, is_git_repo
 
 
-def discover_files(
-    root: Path, config: SemdexConfig, respect_gitignore: bool = True
-) -> list[Path]:
-    """Walk root and return indexable file paths."""
+def _discover_via_git(root: Path, config: SemdexConfig) -> list[Path] | None:
+    """Use git ls-files for fast discovery. Returns None if not a git repo."""
+    import subprocess
+
+    if not is_git_repo(root):
+        return None
+
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=root,
+            capture_output=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            return None
+
+        # Parse null-separated output
+        raw = result.stdout.decode("utf-8", errors="replace")
+        rel_paths = [p for p in raw.split("\0") if p]
+
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+
+    # Apply our filters (excludes, binary, size)
+    ignore_patterns = list(DEFAULT_EXCLUDES) + config.extra_excludes
+    spec = pathspec.GitIgnoreSpec.from_lines(ignore_patterns)
+
+    files = []
+    for rel in rel_paths:
+        if spec.match_file(rel):
+            continue
+
+        path = root / rel
+        if path.suffix.lower() in BINARY_EXTENSIONS:
+            continue
+
+        try:
+            if path.stat().st_size > config.max_file_size:
+                continue
+        except OSError:
+            continue
+
+        files.append(path)
+
+    return sorted(files)
+
+
+def _discover_via_walk(root: Path, config: SemdexConfig, respect_gitignore: bool) -> list[Path]:
+    """Fallback: walk filesystem with rglob."""
     ignore_patterns = list(DEFAULT_EXCLUDES) + config.extra_excludes
 
     if respect_gitignore:
@@ -44,6 +90,20 @@ def discover_files(
         files.append(path)
 
     return sorted(files)
+
+
+def discover_files(
+    root: Path, config: SemdexConfig, respect_gitignore: bool = True
+) -> list[Path]:
+    """Discover indexable files. Uses git ls-files when available for speed."""
+    if respect_gitignore:
+        # Try git first - much faster for large repos
+        files = _discover_via_git(root, config)
+        if files is not None:
+            return files
+
+    # Fallback to filesystem walk
+    return _discover_via_walk(root, config, respect_gitignore)
 
 
 from datetime import datetime, timezone
@@ -404,40 +464,54 @@ def index_project(
     used_git_diff = False
     files_to_delete: list[str] = []
 
+    # Determine paths
     if target_dir:
-        file_list = discover_files(target_dir, config, respect_gitignore=False)
         source_dir = str(target_dir.resolve())
         base_path = target_dir
         git_root = target_dir
+        respect_gitignore = False
     elif files:
-        file_list = files
         source_dir = str(project_root.resolve())
         base_path = project_root
         git_root = project_root
+        respect_gitignore = True
     else:
-        file_list = discover_files(project_root, config)
         source_dir = str(project_root.resolve())
         base_path = project_root
         git_root = project_root
+        respect_gitignore = True
 
-    # Try git diff first, fall back to mtime
+    # Check if we can use git diff (skip full discovery for incremental)
     current_commit = get_current_commit(git_root) if is_git_repo(git_root) else None
     last_commit = git_state.get_commit(source_dir)
 
-    if (
+    can_use_git_diff = (
         not force
         and not files  # Can't use git diff for specific file lists
         and current_commit
         and last_commit
         and is_ancestor(git_root, last_commit, current_commit)
-    ):
-        # Git history is linear, use git diff for precision
-        to_index, to_skip, files_to_delete = _filter_files_by_git(
-            file_list, store, git_root, last_commit, current_commit
+    )
+
+    if can_use_git_diff:
+        # Fast path: get only changed files from git, skip full discovery
+        to_index, files_to_delete = _get_changed_files_for_index(
+            git_root, base_path, config, last_commit, current_commit
         )
+        # For git diff mode, we don't know total file count without discovery
+        # Use store stats as approximation
+        store_stats = store.stats()
+        total_files = store_stats["total_files"] + len(to_index)
+        to_skip = []  # We don't enumerate skipped files in fast path
         used_git_diff = True
     else:
-        # Fall back to mtime: force mode, no git, no prior commit, history diverged, or specific files
+        # Full discovery path
+        if files:
+            file_list = files
+        else:
+            file_list = discover_files(base_path, config, respect_gitignore=respect_gitignore)
+
+        total_files = len(file_list)
         to_index, to_skip = _filter_files_by_mtime(file_list, store, force, base_path)
 
     # Further filter using checkpoint (covers files processed but not yet flushed to DB)
@@ -461,7 +535,6 @@ def index_project(
         to_index = checkpoint_remaining
 
     now = datetime.now(timezone.utc).isoformat()
-    total_files = len(file_list)
     files_skipped = len(to_skip)
 
     use_parallel = (
@@ -488,8 +561,8 @@ def index_project(
             for rel_path in files_to_delete:
                 store.delete_by_file(rel_path)
             files_deleted = len(files_to_delete)
-        else:
-            # Mtime mode: scan for files no longer present
+        elif not used_git_diff:
+            # Mtime mode: scan for files no longer present (file_list exists in this path)
             files_deleted = _prune_deleted_files(file_list, store, source_dir, base_path)
 
     # Update git state after successful indexing (not for specific file lists)
@@ -566,45 +639,52 @@ def _filter_files_by_mtime(
     return (to_index, to_skip)
 
 
-def _filter_files_by_git(
-    all_files: list[Path],
-    store: SemdexStore,
-    project_root: Path,
+def _get_changed_files_for_index(
+    git_root: Path,
+    base_path: Path,
+    config: SemdexConfig,
     last_commit: str,
     current_commit: str,
-) -> tuple[list[Path], list[Path], list[str]]:
-    """Filter files based on git diff, returning (to_index, to_skip, to_delete).
+) -> tuple[list[Path], list[str]]:
+    """Get changed files directly from git diff, skipping full discovery.
 
     Args:
-        all_files: All discovered files in the project
-        store: SemdexStore instance
-        project_root: Project root path
+        git_root: Git repository root
+        base_path: Base path for file resolution
+        config: SemdexConfig for filtering
         last_commit: Last indexed commit SHA
         current_commit: Current HEAD commit SHA
 
     Returns:
-        (files_to_index, files_to_skip, files_to_delete)
+        (files_to_index, files_to_delete)
     """
-    modified_or_added, deleted = get_changed_files(project_root, last_commit, current_commit)
+    modified_or_added, deleted = get_changed_files(git_root, last_commit, current_commit)
 
-    # Convert to sets for fast lookup
-    changed_set = set(modified_or_added)
+    # Build exclude spec
+    ignore_patterns = list(DEFAULT_EXCLUDES) + config.extra_excludes
+    spec = pathspec.GitIgnoreSpec.from_lines(ignore_patterns)
 
     to_index = []
-    to_skip = []
+    for rel_path in modified_or_added:
+        # Apply filters
+        if spec.match_file(rel_path):
+            continue
 
-    for file_path in all_files:
+        path = base_path / rel_path
+        if path.suffix.lower() in BINARY_EXTENSIONS:
+            continue
+
         try:
-            rel_path = str(file_path.relative_to(project_root))
-        except ValueError:
-            rel_path = file_path.name
+            if not path.exists():
+                continue
+            if path.stat().st_size > config.max_file_size:
+                continue
+        except OSError:
+            continue
 
-        if rel_path in changed_set:
-            to_index.append(file_path)
-        else:
-            to_skip.append(file_path)
+        to_index.append(path)
 
-    return (to_index, to_skip, deleted)
+    return (to_index, deleted)
 
 
 def _prune_deleted_files(

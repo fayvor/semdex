@@ -262,7 +262,7 @@ def test_index_uses_git_diff_when_available():
         stats2 = index_project(root, config)
         assert stats2["used_git_diff"] is True
         assert stats2["files_indexed"] == 1  # Only file2
-        assert stats2["files_skipped"] >= 1  # file1 and README
+        # In fast git diff mode, we don't enumerate skipped files (that's the optimization)
 
 
 def test_index_falls_back_to_mtime_without_git():
